@@ -1,0 +1,35 @@
+# requirements.txt
+# ─────────────────────────────────────────────────────────────
+# Installer avec : pip install -r requirements.txt
+#
+# 🔬 NOTE : UNI et CONCH nécessitent une demande d'accès sur HuggingFace
+#   UNI   : https://huggingface.co/MahmoodLab/UNI
+#   CONCH : https://huggingface.co/MahmoodLab/CONCH
+# ─────────────────────────────────────────────────────────────
+
+# Deep Learning
+torch>=2.1.0
+torchvision>=0.16.0
+
+# Fine-tuning efficace (LoRA, DoRA, QLoRA...)
+peft>=0.10.0
+
+# Foundation models
+timm>=0.9.12               # Pour UNI (ViT via timm)
+transformers>=4.37.0       # Pour CONCH (HuggingFace)
+huggingface_hub>=0.20.0    # Téléchargement des poids
+
+# Augmentations histologie
+albumentations>=1.4.0      # HEDColorJitter disponible depuis 1.4
+
+# Utilitaires
+numpy>=1.24.0
+Pillow>=10.0.0
+tqdm>=4.65.0
+
+# Optionnel : logging expériences
+wandb>=0.16.0              # pip install wandb && wandb login
+tensorboard>=2.14.0
+
+# Optionnel : accélération
+einops>=0.7.0              # Opérations sur les tenseurs

@@ -1,0 +1,12 @@
+data/
+
+*.pdf
+*.png
+*.csv
+
+.env
+__pycache__/
+.ipynb_checkpoints
+.venv
+.ruff_cache/
+.python-version
