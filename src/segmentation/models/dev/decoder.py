@@ -31,7 +31,7 @@ Flux de données :
        │
     ASPP          → contexte enrichi sur p3 (bottleneck)
        │
-  UpBlock ×3     → + skip connections (p2, p1, p0) avec Attention Gates
+  UpBlock x3     → + skip connections (p2, p1, p0) avec Attention Gates
        │
   Seg Head       → logits (B, num_classes, H, W)
 
@@ -131,7 +131,7 @@ class ResBlock(nn.Module):
     Avantages vs DoubleConv :
       • Connexion résiduelle : gradient circule directement, convergence plus stable
       • SE : recalibre les canaux sans coût mémoire important
-      • Compatible avec tout ratio in_c / out_c (projection 1×1 si nécessaire)
+      • Compatible avec tout ratio in_c / out_c (projection 1x1 si nécessaire)
 
     🔬 [EXP]
       - Ajouter une 3ème conv (bottleneck ResNet-style) pour les grands channels
@@ -187,10 +187,10 @@ class ASPP(nn.Module):
     sans réduire la résolution spatiale.
 
     Branches :
-      • Conv 1×1           (contexte local)
-      • Conv 3×3 dilatée ×6, ×12, ×18  (contexte moyen à large)
+      • Conv 1x1           (contexte local)
+      • Conv 3x3 dilatée x6, x12, x18  (contexte moyen à large)
       • Global Average Pooling          (contexte global)
-    → Concat + Conv 1×1 de fusion
+    → Concat + Conv 1x1 de fusion
 
     Pourquoi ici ?
     Les features ViT à H/32 ont déjà un champ récepteur global (attention),
@@ -200,7 +200,7 @@ class ASPP(nn.Module):
     🔬 [EXP]
       - dilations : (6,12,18) standard DeepLabv3 vs (3,6,12) pour H/32 petite
       - out_channels : 256 (défaut) vs 512 si proj_dim élevé
-      - Désactiver ASPP si la feature map H/32 est déjà trop petite (<7×7)
+      - Désactiver ASPP si la feature map H/32 est déjà trop petite (<7x7)
     """
 
     def __init__(
@@ -277,7 +277,7 @@ class FPNNeck(nn.Module):
 
     def __init__(self, channels: int, norm: str = "gn", act: str = "gelu"):
         super().__init__()
-        # Conv 3×3 post-fusion pour lisser les artefacts d'upsampling
+        # Conv 3x3 post-fusion pour lisser les artefacts d'upsampling
         self.smooth = nn.ModuleList([
             nn.Sequential(
                 conv3x3(channels, channels),
@@ -358,7 +358,7 @@ class AttentionGate(nn.Module):
 class UpBlock(nn.Module):
     """
     Étape de décodage :
-      1. Bilinear ×2
+      1. Bilinear x2
       2. Attention Gate sur le skip FPN (optionnel)
       3. Concat [upsampled, skip]
       4. ResBlock avec SE
@@ -424,20 +424,20 @@ class UNetDecoder(nn.Module):
     Sortie  : {"logits": (B, C, H, W)} + auxiliaires si deep_supervision
 
     Pipeline :
-      FPNNeck → ASPP(f3) → UpBlock×3 → UpBlock final → SegHead
+      FPNNeck → ASPP(f3) → UpBlockx3 → UpBlock final → SegHead
 
     Résolutions (patch_size=16, img=224, out_indices=[5,11,17,23]) :
-      f0 : 28×28 (H/8)   f1 : 14×14 (H/16)
-      f2 : 7×7  (H/32)   f3 : 4×4   (H/64 approx.)
+      f0 : 28x28 (H/8)   f1 : 14x14 (H/16)
+      f2 : 7x7  (H/32)   f3 : 4x4   (H/64 approx.)
 
     Résolutions (patch_size=16, img=512, out_indices=[5,11,17,23]) :
-      f0 : 64×64          f1 : 32×32
-      f2 : 16×16          f3 : 8×8
+      f0 : 64x64          f1 : 32x32
+      f2 : 16x16          f3 : 8x8
 
     🔬 [EXP] :
       channels   : [512,256,128,64] (large) vs [256,128,64,32] (léger)
       use_fpn    : True/False — mesurer l'apport du neck
-      aspp_dil   : (6,12,18) standard vs (3,6,12) si feature map H/32 < 10×10
+      aspp_dil   : (6,12,18) standard vs (3,6,12) si feature map H/32 < 10x10
       norm_type  : "gn" (recommandé avec peft/petit batch) vs "bn"
     """
 
@@ -482,7 +482,7 @@ class UNetDecoder(nn.Module):
 
         # ── Supervision profonde ───────────────────────────────────────────
         if self.deep_supervision:
-            # Têtes légères (conv 1×1) aux sorties intermédiaires
+            # Têtes légères (conv 1x1) aux sorties intermédiaires
             self.aux1 = conv1x1(ch[1], cfg.num_classes)   # après up1 (H/16)
             self.aux2 = conv1x1(ch[2], cfg.num_classes)   # après up2 (H/8)
             self.aux3 = conv1x1(ch[3], cfg.num_classes)   # après up3 (H/4)
@@ -515,6 +515,169 @@ class UNetDecoder(nn.Module):
         a3 = x
 
         x = self.up4(x)            # (B, ch[3], H/4,  W/4)
+
+        # ── Upsampling final ─────────────────────────────────────────────
+        x = F.interpolate(x, size=target_size, mode="bilinear", align_corners=False)
+        logits = self.seg_head(x)
+
+        output = {"logits": logits}
+
+        if self.deep_supervision and self.training:
+            def aux_up(t, head):
+                return head(F.interpolate(t, size=target_size,
+                                          mode="bilinear", align_corners=False))
+            output["aux1"] = aux_up(a1, self.aux1)
+            output["aux2"] = aux_up(a2, self.aux2)
+            output["aux3"] = aux_up(a3, self.aux3)
+
+        return output
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+class SimpleFPN(nn.Module):
+    """
+    🔬 [EXP] :
+      - out_channels : [64,128,256,512] standard vs [128,256,512,512] plus riche
+      - norm_type    : "gn" recommandé (cohérent avec le décodeur)
+      - Ajouter une conv 3×3 supplémentaire après chaque upsampling
+    """
+
+    def __init__(
+        self,
+        embed_dim: int,
+        out_channels: List[int],    # [c_H4, c_H8, c_H16, c_H32]
+        norm: str = "gn",
+        act: str = "gelu",
+    ):
+        super().__init__()
+        c0, c1, c2, c3 = out_channels  # du plus grand au plus petit spatial
+
+        def up_block(in_c, out_c):
+            """Bilinear ×2 + Conv3×3 — évite les artefacts ConvTranspose2d."""
+            return nn.Sequential(
+                nn.Upsample(scale_factor=2, mode="bilinear", align_corners=False),
+                conv3x3(in_c, out_c),
+                get_norm(norm, out_c),
+                get_act(act),
+            )
+
+        # H/4 : ×4 depuis H/16 (deux upsampling successifs)
+        self.scale_1_4 = nn.Sequential(
+            up_block(embed_dim, c0),
+            up_block(c0, c0),           # second ×2 avec les canaux déjà réduits
+        )
+
+        # H/8 : ×2 depuis H/16
+        self.scale_1_8 = up_block(embed_dim, c1)
+
+        # H/16 : même résolution, projection 1×1
+        self.scale_1_16 = nn.Sequential(
+            conv1x1(embed_dim, c2),
+            get_norm(norm, c2),
+            get_act(act),
+        )
+
+        # H/32 : ×2 downsampling depuis H/16
+        self.scale_1_32 = nn.Sequential(
+            nn.Conv2d(embed_dim, c3, kernel_size=3, stride=2, padding=1, bias=False),
+            get_norm(norm, c3),
+            get_act(act),
+        )
+
+    def forward(self, x: torch.Tensor) -> List[torch.Tensor]:
+        """
+        x : (B, embed_dim, H/16, W/16)
+        → [f0 (H/4), f1 (H/8), f2 (H/16), f3 (H/32)]
+        """
+        return [
+            self.scale_1_4(x),    # (B, c0, H/4,  W/4)
+            self.scale_1_8(x),    # (B, c1, H/8,  W/8)
+            self.scale_1_16(x),   # (B, c2, H/16, W/16)
+            self.scale_1_32(x),   # (B, c3, H/32, W/32)
+        ]
+
+
+class UNetDecoder2(nn.Module):
+
+
+    def __init__(self, cfg: DecoderConfig, encoder_channels: List[int]):
+        super().__init__()
+        ch = cfg.channels            # [ch0, ch1, ch2, ch3]
+        norm = cfg.norm_type
+        act = cfg.activation
+        drop = cfg.dropout_rate
+        use_attn = cfg.use_attention_gate
+        self.deep_supervision = cfg.deep_supervision
+
+        c_f0, c_f1, c_f2, c_f3 = encoder_channels
+
+
+        # ── Bottleneck ASPP ────────────────────────────────────────────────
+        self.aspp = ASPP(
+            in_channels=c_f3,
+            out_channels=ch[0],
+            dilations=getattr(cfg, "aspp_dilations", (6, 12, 18)),
+            norm=norm, act=act,
+        )
+
+        # ── Blocs de décodage ──────────────────────────────────────────────
+        self.up1 = UpBlock(ch[0], c_f2, ch[1], use_attn, norm, act, drop)
+        self.up2 = UpBlock(ch[1], c_f1, ch[2], use_attn, norm, act, drop)
+        self.up3 = UpBlock(ch[2], c_f0, ch[3], use_attn, norm, act, drop)
+
+        # ── Tête de segmentation ───────────────────────────────────────────
+        self.seg_head = nn.Sequential(
+            ResBlock(ch[3], ch[3], norm=norm, act=act),
+            conv1x1(ch[3], cfg.num_classes),
+        )
+
+        # ── Supervision profonde ───────────────────────────────────────────
+        if self.deep_supervision:
+            # Têtes légères (conv 1x1) aux sorties intermédiaires
+            self.aux1 = conv1x1(ch[1], cfg.num_classes)   # après up1 (H/16)
+            self.aux2 = conv1x1(ch[2], cfg.num_classes)   # après up2 (H/8)
+            self.aux3 = conv1x1(ch[3], cfg.num_classes)   # après up3 (H/4)
+
+    def forward(
+        self,
+        features: List[torch.Tensor],
+        target_size: Optional[tuple] = None,
+    ) -> Dict[str, torch.Tensor]:
+        """
+        features : [f0 (grande), f1, f2, f3 (petite)]
+        target_size : résolution de sortie finale (H_img, W_img)
+        """
+
+        f0, f1, f2, f3 = features
+        target_size = target_size
+
+        # ── FPN ─────────────────────────────────────────────────────────
+
+        # ── Bottleneck ASPP ──────────────────────────────────────────────
+        x = self.aspp(f3)          # (B, ch[0], H/64, W/64)
+
+        # ── Décodage ────────────────────────────────────────────────────
+        x = self.up1(x, f2)        # (B, ch[1], H/32, W/32)
+        a1 = x
+
+        x = self.up2(x, f1)        # (B, ch[2], H/16, W/16)
+        a2 = x
+
+        x = self.up3(x, f0)        # (B, ch[3], H/8,  W/8)
+        a3 = x
+
 
         # ── Upsampling final ─────────────────────────────────────────────
         x = F.interpolate(x, size=target_size, mode="bilinear", align_corners=False)

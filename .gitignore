@@ -1,8 +1,10 @@
 data/
+slurm_out/
 
 *.pdf
 *.png
 *.csv
+*.ckpt
 
 .env
 __pycache__/
@@ -10,3 +12,7 @@ __pycache__/
 .venv
 .ruff_cache/
 .python-version
+
+pretrain_models/
+
+test_run.sh

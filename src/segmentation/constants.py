@@ -10,6 +10,14 @@ CLASSES_TO_LABELS = {
     'necrosis': 2,
     'stroma': 3
 }
+
+LABELS_TO_CLASSES = {
+    0: 'other',
+    1: 'tumor',
+    2: 'necrosis',
+    3: 'stroma',
+}
+
 CLASS_CONVERSION_LUAD = {
     'tumor': [0],
     'necrosis': [1],

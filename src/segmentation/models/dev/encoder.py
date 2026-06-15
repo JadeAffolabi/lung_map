@@ -30,7 +30,7 @@ Extraction multi-échelle :
 import timm
 import torch
 import torch.nn as nn
-from typing import List, Dict, Optional
+from typing import List, Dict, Union
 from peft import LoraConfig, get_peft_model
 from config import EncoderConfig
 
@@ -91,19 +91,9 @@ def load_conch(cfg: EncoderConfig):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class IntermediateFeatureExtractor:
-    """
-    Enregistre des forward hooks sur les blocs ViT spécifiés.
-    Fonctionne avec n'importe quel wrapper autour du backbone (peft, DDP…).
-
-    Usage :
-        extractor = IntermediateFeatureExtractor(backbone, out_indices=[5,11,17,23])
-        _ = backbone(x)
-        features = extractor.get_features()   # dict {idx: tensor}
-        extractor.clear()
-    """
 
     def __init__(self, model: nn.Module, out_indices: List[int]):
-        self._features: Dict[int, torch.Tensor] = {}
+        self._features = dict()
         self._hooks = []
 
         # Récupère les blocs ViT, qu'ils soient enveloppés par peft ou non
@@ -116,11 +106,7 @@ class IntermediateFeatureExtractor:
             self._hooks.append(hook)
 
     @staticmethod
-    def _find_blocks(model: nn.Module) -> nn.ModuleList:
-        """
-        Cherche l'attribut `blocks` dans le modèle ou son backbone sous-jacent.
-        Robuste aux wrappers peft (PeftModel enveloppe dans model.base_model.model…).
-        """
+    def _find_blocks(model: nn.Module) -> Union[nn.ModuleList, nn.Sequential] :
         for attr in ["blocks", "base_model.model.blocks", "model.blocks",
                      "base_model.blocks", "vision_model.encoder.layers"]:
             obj = model
@@ -202,9 +188,6 @@ class FoundationEncoder(nn.Module):
             for p in self.backbone.parameters():
                 p.requires_grad = False
 
-        elif cfg.finetune_strategy == "full":
-            pass  # Tout entraînable — nécessite lr_encoder très faible (~1e-6)
-
         else:
             raise ValueError(f"Stratégie inconnue : {cfg.finetune_strategy}")
 
@@ -212,31 +195,25 @@ class FoundationEncoder(nn.Module):
         self._extractor = IntermediateFeatureExtractor(self.backbone, self.out_indices)
 
         # ── 4. Projections 1×1 : embed_dim → proj_dim (uniforme) ──────────
-        # On ne connaît pas embed_dim statiquement pour CONCH vs UNI,
-        # on le détecte au premier forward (lazy init).
         self.proj_dim = cfg.proj_dim
-        self._proj_initialized = False
-        self.feature_projs: Optional[nn.ModuleList] = None
-
-    def _init_projections(self, sample_features: Dict[int, torch.Tensor]):
-        """
-        Initialise les projections 1×1 après le premier forward,
-        une fois la dimension embed_dim connue.
-        """
+        
+        # On définit la dimension explicitement selon le modèle
+        if cfg.name == "uni":
+            embed_dim = 1024 # ViT-Large
+        elif cfg.name == "conch":
+            embed_dim = 768  # ViT-Base
+        else:
+            embed_dim = 768
+            
         projs = []
-        for idx in self.out_indices:
-            feat = sample_features[idx]           # (B, N+1, D) ou (B, D, h, w)
-            # Les sorties de blocs ViT timm sont (B, N, D) — séquence de tokens
-            embed_dim = feat.shape[-1] if feat.dim() == 3 else feat.shape[1]
+        for _ in self.out_indices:
             projs.append(nn.Sequential(
                 nn.Conv2d(embed_dim, self.proj_dim, kernel_size=1, bias=False),
                 nn.BatchNorm2d(self.proj_dim),
                 nn.GELU(),
             ))
-        self.feature_projs = nn.ModuleList(projs).to(
-            next(self.backbone.parameters()).device
-        )
-        self._proj_initialized = True
+
+        self.feature_projs = nn.ModuleList(projs)
 
     @staticmethod
     def _tokens_to_map(tokens: torch.Tensor, has_cls: bool = True) -> torch.Tensor:
@@ -256,21 +233,71 @@ class FoundationEncoder(nn.Module):
         Retourne 4 feature maps projetées :
           [f0 (H/8), f1 (H/16), f2 (H/32), f3 (H/64)]
           (strides relatifs au patch_size=16 et à out_indices)
-        """
+        """      
         self._extractor.clear()
-
-        # Forward complet du backbone (les hooks capturent les sorties intermédiaires)
         _ = self.backbone(x)
-        raw: Dict[int, torch.Tensor] = self._extractor.get_features()
+        raw = self._extractor.get_features()
 
-        # Init lazy des projections
-        if not self._proj_initialized:
-            self._init_projections(raw)
-
-        # Conversion tokens → feature maps + projection
         features = []
         for proj, idx in zip(self.feature_projs, self.out_indices):
-            feat_map = self._tokens_to_map(raw[idx])   # (B, D, h, w)
-            features.append(proj(feat_map))            # (B, proj_dim, h, w)
+            feat_map = self._tokens_to_map(raw[idx])   
+            features.append(proj(feat_map))
 
         return features   # [f0, f1, f2, f3], résolutions décroissantes
+
+
+class FoundationEncoder2(nn.Module):
+    """
+    Retourne uniquement la feature map de la dernière couche ViT.
+    Shape : (B, embed_dim, H/patch_size, W/patch_size)
+    Le Simple FPN se charge de créer la pyramide multi-échelle.
+    """
+
+    def __init__(self, cfg: EncoderConfig):
+        super().__init__()
+        self.cfg = cfg
+
+        # Chargement backbone
+        loaders = {"uni": load_uni, "conch": load_conch}
+        self.backbone = loaders[cfg.name](cfg)
+
+        # LoRA ou frozen (inchangé)
+        if cfg.finetune_strategy == "lora":
+            lora_config = LoraConfig(
+                r=cfg.lora_rank, lora_alpha=cfg.lora_alpha,
+                lora_dropout=cfg.lora_dropout,
+                target_modules=cfg.lora_target_modules,
+                bias="none",
+            )
+            self.backbone = get_peft_model(self.backbone, lora_config)
+            self.backbone.print_trainable_parameters()
+
+        elif cfg.finetune_strategy == "frozen":
+            for p in self.backbone.parameters():
+                p.requires_grad = False
+
+        # Hook sur le DERNIER bloc uniquement
+        self._last_features = None
+        blocks = IntermediateFeatureExtractor._find_blocks(self.backbone)
+        blocks[-1].register_forward_hook(
+            lambda _, __, output: setattr(self, "_last_features", output)
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Retourne (B, embed_dim, H/patch_size, W/patch_size)
+        """
+        self._last_features = None
+        _ = self.backbone(x)
+
+        # _tokens_to_map retire le CLS et reshape
+        return FoundationEncoder._tokens_to_map(self._last_features)
+
+    @staticmethod
+    def _tokens_to_map(tokens: torch.Tensor, has_cls: bool = True) -> torch.Tensor:
+        if tokens.dim() == 4:
+            return tokens
+        seq = tokens[:, 1:] if has_cls else tokens
+        B, N, D = seq.shape
+        h = w = int(N ** 0.5)
+        return seq.transpose(1, 2).reshape(B, D, h, w)

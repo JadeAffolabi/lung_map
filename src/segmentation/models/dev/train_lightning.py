@@ -1,37 +1,7 @@
-"""
-train_lightning.py — Point d'entrée d'entraînement (PyTorch Lightning)
-=======================================================================
-
-Usage :
-    python train_lightning.py                          # config par défaut
-    python train_lightning.py --strategy ddp --devices 4  # multi-GPU
-
-Architecture du script :
-    1. Config          → dataclasses (config.py)
-    2. Callbacks       → ModelCheckpoint, EarlyStopping, LRMonitor, RichProgressBar
-    3. Logger          → WandbLogger (ou CSVLogger en fallback)
-    4. Trainer         → assemble tout + gère AMP, gradient clip, DDP
-    5. trainer.fit()   → boucle complète
-    6. trainer.test()  → évaluation finale sur test set
-
-Comparaison avec train.py (PyTorch pur) :
-  ┌─────────────────────┬──────────────────┬──────────────────────────────┐
-  │ Fonctionnalité      │ train.py manuel  │ Lightning                    │
-  ├─────────────────────┼──────────────────┼──────────────────────────────┤
-  │ Mixed precision     │ GradScaler       │ Trainer(precision="16-mixed")│
-  │ Gradient clipping   │ clip_grad_norm_  │ Trainer(gradient_clip_val=.) │
-  │ Checkpointing       │ torch.save(...)  │ ModelCheckpoint callback     │
-  │ Early stopping      │ à coder          │ EarlyStopping callback       │
-  │ Multi-GPU           │ DDP manuel       │ Trainer(devices=N)           │
-  │ Logging             │ print / wandb    │ self.log() → partout         │
-  │ Reproductibilité    │ seed manuel      │ seed_everything()            │
-  └─────────────────────┴──────────────────┴──────────────────────────────┘
-"""
 
 import os
 
 import argparse
-import glob
 import pytorch_lightning as pl
 from pytorch_lightning import Trainer
 from pytorch_lightning.callbacks import (
@@ -41,62 +11,55 @@ from pytorch_lightning.callbacks import (
     RichProgressBar,
     RichModelSummary,
 )
-from pytorch_lightning.loggers import WandbLogger, CSVLogger, TensorBoardLogger
+from pytorch_lightning.loggers import WandbLogger, TensorBoardLogger
 
 from config import Config, EncoderConfig, DecoderConfig, TrainingConfig
-from lightning_module import SegmentationModule
-from data_module import SegmentationDataModule
-from src.segmentation.constants import PATH_SEG_DATA, ACCESS_TOKEN
+from lightning_module import SegmentationModule, SegmentationModuleFM
+from data_module import SegmentationDataModule, SegmentationDataModule2, get_path_shards, get_class_weight
+from src.segmentation.constants import ACCESS_TOKEN
 from huggingface_hub import login
+import torch
 
 os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# 1. CALLBACKS
-# ═══════════════════════════════════════════════════════════════════════════════
+torch.set_float32_matmul_precision('medium')
+
 
 def build_callbacks(cfg: Config) -> list:
-    """
-    Callbacks Lightning. Chacun est indépendant et peut être activé/désactivé.
-
-    🔬 [EXP] :
-      ModelCheckpoint : monitor="val/dice" → sauvegarder sur IoU plutôt ?
-      EarlyStopping   : patience=15 → réduire pour les runs rapides
-      StochasticWeightAveraging (SWA) : à ajouter si plateau en fin d'entraînement
-        from pytorch_lightning.callbacks import StochasticWeightAveraging
-        SWA(swa_lrs=1e-4, swa_epoch_start=0.8)
-    """
     return [
         # ── Sauvegarde du meilleur modèle ──────────────────────────────────
         ModelCheckpoint(
             dirpath=cfg.training.save_dir,
-            filename="best-{epoch:03d}-{val/dice:.4f}",
-            monitor="val/dice",
+            filename="best-{epoch:03d}-{val_dice:.4f}",
+            monitor="val/val_dice",
             mode="max",
-            save_top_k=3,          # [EXP] garder les 3 meilleurs
-            save_last=True,        # toujours sauvegarder le dernier checkpoint
+            save_top_k=1,       
+            save_last=False,
+            save_weights_only=True,   
             auto_insert_metric_name=False,
         ),
 
-        # ── Arrêt anticipé ─────────────────────────────────────────────────
-        # Évite de continuer si la validation stagne.
-        EarlyStopping(
-            monitor="val/dice",
-            mode="max",
-            patience=15,           # [EXP] 10 (agressif) → 20 (patient)
-            min_delta=1e-4,        # amélioration minimale considérée
-            verbose=True,
+        ModelCheckpoint(
+        dirpath=cfg.training.save_dir,
+        filename="last",
+        save_top_k=0,
+        save_last=True,
+        save_weights_only=False,
         ),
 
-        # ── Suivi du learning rate ─────────────────────────────────────────
-        # Logue les LR à chaque epoch → visible dans WandB/TensorBoard
         LearningRateMonitor(logging_interval="epoch"),
 
-        # ── Interface terminal ─────────────────────────────────────────────
         RichProgressBar(),
         RichModelSummary(max_depth=3),
     ]
 
+""" EarlyStopping(
+            monitor="val/val_dice",
+            mode="max",
+            patience=20,
+            min_delta=1e-4,
+            verbose=True,
+        ) """
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 2. LOGGER
@@ -115,21 +78,20 @@ def build_logger(cfg: Config, use_wandb: bool = True):
         try:
             wandb_logger = WandbLogger(
                 project="histo-segmentation",
-                name=f"{cfg.encoder.name}_{cfg.encoder.finetune_strategy}"
-                     f"_r{cfg.encoder.lora_rank}",
-                log_model="all",    # upload les checkpoints dans WandB
+                log_model=False,
                 config={
-                    "encoder": cfg.encoder.__dict__,
-                    "decoder": cfg.decoder.__dict__,
-                    "training": cfg.training.__dict__,
+                    "training": cfg.__dict__,
                 },
+                save_dir=cfg.training.save_dir
             )
             loggers.append(wandb_logger)
         except Exception as e:
             print(f"WandB non disponible ({e}), fallback CSV.")
-
-    # CSVLogger toujours actif comme fallback
-    loggers.append(CSVLogger(save_dir=cfg.training.save_dir, name="csv_logs"))
+    else:
+        loggers.append(TensorBoardLogger(
+            save_dir=cfg.training.save_dir,
+            name="tensorboard",
+        ))
 
     return loggers if len(loggers) > 1 else loggers[0]
 
@@ -139,22 +101,6 @@ def build_logger(cfg: Config, use_wandb: bool = True):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def build_trainer(cfg: Config, args: argparse.Namespace) -> Trainer:
-    """
-    Trainer Lightning : assemble tous les composants.
-
-    Paramètres clés :
-      precision       : "16-mixed"    → AMP BFloat16/FP16 (économise ~40% VRAM)
-                        "bf16-mixed"  → plus stable que fp16 (recommandé sur A100)
-                        "32-true"     → debug ou si instabilité numérique
-      devices         : N GPUs, ou "auto"
-      strategy        : "ddp" pour multi-GPU, "auto" en single GPU
-      accumulate_grad : simule un batch_size × N sans VRAM supplémentaire
-
-    🔬 [EXP] :
-      accumulate_grad_batches : 4 → batch effectif = cfg.batch_size × 4
-      val_check_interval      : 0.5 → valider 2× par époque (utile sur gros datasets)
-      sync_batchnorm          : True si BatchNorm + multi-GPU (pas nécessaire avec GN)
-    """
     return Trainer(
         # ── Durée ─────────────────────────────────────────────────────────
         max_epochs=cfg.training.max_epochs,
@@ -168,12 +114,11 @@ def build_trainer(cfg: Config, args: argparse.Namespace) -> Trainer:
         strategy=getattr(args, "strategy", "auto"),
 
         # ── Gradient ──────────────────────────────────────────────────────
-        gradient_clip_val=cfg.training.gradient_clip,
-        gradient_clip_algorithm="norm",  # "norm" ou "value"
-        accumulate_grad_batches=getattr(args, "accumulate_grad", 1),  # [EXP]
+        # gradient_clip_val=cfg.training.gradient_clip,
+        # gradient_clip_algorithm="norm",  # "norm" ou "value"
+        # accumulate_grad_batches=getattr(args, "accumulate_grad", 1),  # [EXP]
 
         # ── Validation ────────────────────────────────────────────────────
-        val_check_interval=10000,     # [EXP] 0.5 pour valider 2× par époque
         check_val_every_n_epoch=1,
 
         # ── Callbacks et loggers ──────────────────────────────────────────
@@ -184,9 +129,6 @@ def build_trainer(cfg: Config, args: argparse.Namespace) -> Trainer:
         deterministic=False,       # True → plus lent mais reproductible strictement
 
         # ── Debug ─────────────────────────────────────────────────────────
-        fast_dev_run=cfg.training.fast_dev_run,       # 1 batch train+val → vérifie que le code tourne
-        # overfit_batches=0.01,    # sur-apprend 1% des données → test de sanité
-        # profiler="simple",       # profile CPU/GPU pour trouver les goulots
         log_every_n_steps=cfg.training.log_every_n_steps,
     )
 
@@ -203,12 +145,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--accumulate-grad",  type=int,   default=1,
                         dest="accumulate_grad")
     parser.add_argument("--no-wandb",         action="store_false", dest="wandb")
-    parser.add_argument("--fast-dev-run",     action="store_true",  dest="fast_dev_run")
+    parser.add_argument("--save_dir", type=str)
     return parser.parse_args()
-
-def get_path_shards(split: str):
-    path_to_shards = str(PATH_SEG_DATA / 'data-shards')
-    return glob.glob(path_to_shards + f"/dataset-{split}-*.tar")
 
 def main():
     args = parse_args()
@@ -217,52 +155,76 @@ def main():
     pl.seed_everything(42, workers=True)
 
     # ── Configuration ─────────────────────────────────────────────────────
-    cfg = Config()
-    cfg.encoder.name               = "uni"
-    cfg.encoder.finetune_strategy  = "frozen"
-    cfg.encoder.lora_rank          = 16
-    cfg.encoder.lora_target_modules = ["qkv", "proj"]
-    cfg.encoder.out_indices        = [5, 11, 17, 23]
-    cfg.encoder.proj_dim           = 256
+    cfg = Config(
+        encoder=None,
+        decoder=None,
+    )
 
-    cfg.decoder.num_classes        = 4
-    cfg.decoder.channels           = [512, 256, 128, 64]
-    cfg.decoder.deep_supervision   = False
-    cfg.decoder.use_fpn            = False
-    cfg.decoder.norm_type          = "bn"
-    cfg.decoder.activation         = "gelu"
+    cfg.training.num_workers       = 4
+    cfg.training.batch_size        = 64
+    cfg.training.max_epochs        = 200
+    cfg.training.warmup_epochs     = 0
+    cfg.training.optimizer         = 'adamw'
+    cfg.training.lr                = 1e-3
+    cfg.training.weight_decay      = 0.0001
+    cfg.training.scheduler         = 'cosine'
 
-    cfg.training.batch_size        = 4
-    cfg.training.max_epochs        = 100
-    cfg.training.warmup_epochs     = 5
-    cfg.training.lr_encoder        = 1e-5
-    cfg.training.lr_decoder        = 1e-4
+    cfg.training.dropout           = 0.0
+
     cfg.training.loss_type         = "ce+dice"
-    cfg.training.save_dir          = "./checkpoints"
+    cfg.training.dice_weight       = 0.5
+    cfg.training.focal_gamma       = 0
+
+    cfg.training.save_dir          = args.save_dir
 
     # ── Login Hugginface ───────────────────────────────────────────────────
-    login(ACCESS_TOKEN)
+    #login(ACCESS_TOKEN)
 
     # ── Module et DataModule ───────────────────────────────────────────────
 
-    module     = SegmentationModule(cfg)
+    """ datamodule = SegmentationDataModule2(
+        train_urls=get_path_shards('train'),
+        val_urls=get_path_shards('val'),
+        test_urls=get_path_shards('test'),
+        rare_train_urls=get_path_shards('train-rare'),
+        common_train_urls=get_path_shards('train-common'),
+        batch_size=cfg.training.batch_size, 
+        num_workers=cfg.training.num_workers
+    ) """
+
     datamodule = SegmentationDataModule(
         train_urls=get_path_shards('train'),
         val_urls=get_path_shards('val'),
         test_urls=get_path_shards('test'),
-        batch_size=4, 
-        num_workers=0 
+        batch_size=cfg.training.batch_size, 
+        num_workers=cfg.training.num_workers
     )
+
+    """ cfg.training.class_weights = get_class_weight(
+        datamodule.train_dataloader(),
+        norm=True,
+        square_root=False,    
+    ).tolist() """
+
+    module = SegmentationModule(cfg)
 
     # ── Trainer ───────────────────────────────────────────────────────────
     trainer = build_trainer(cfg, args)
 
     # ── Entraînement ──────────────────────────────────────────────────────
-    trainer.fit(module, datamodule=datamodule)
+    trainer.fit(
+        module, 
+        datamodule,
+    )
 
     # ── Évaluation finale sur le test set ─────────────────────────────────
+    torch.serialization.add_safe_globals([
+        Config, EncoderConfig, 
+        DecoderConfig, TrainingConfig,
+    ])
     trainer.test(module, datamodule=datamodule, ckpt_path="best")
-
+    #trainer.test(module, datamodule=datamodule)
+ 
 
 if __name__ == "__main__":
     main()
