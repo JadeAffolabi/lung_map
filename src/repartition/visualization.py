@@ -230,7 +230,7 @@ def export_tissues_proportion(all_tissues_areas, output='tissues_proportion.pdf'
         d = pdf.infodict()
         d["Title"]   = "Visualization tissue proportion per slide"
 
-def plot_distribution(distrib, show='hist-type-proportion',
+def plot_distribution(distrib, show='hist-proportion',
                        ref='center', figsize=(12, 8), 
                        suptitle="Titre Général",
                        xlabel="Valeurs de x", 
@@ -267,7 +267,8 @@ def plot_distribution(distrib, show='hist-type-proportion',
         ax = axes[i]
         dist = distrib[sld_name]
 
-        ax.set_title(f"Lame {sld_name}", fontsize=12, fontweight='bold', pad=8)
+        title = sld_name if 'UTC' not in sld_name else sld_name.split('UTC')[0]
+        ax.set_title(f"Lame {title}", fontsize=12, fontweight='bold', pad=8)
         ax.set_xlabel(xlabel, fontsize=10, color='#444444')
         ax.set_ylabel(ylabel, fontsize=10, color='#444444')
         
@@ -295,12 +296,12 @@ def plot_distribution(distrib, show='hist-type-proportion',
                 #ax.set_ylim(0, global_y_max * 1.1)
 
         elif show == 'kde':
-            x_eval = np.linspace(0, 1.5, num=50) if ref=='center' else np.linspace(0, 5, num=50)
+            x_eval = np.linspace(0, 2, num=100) if ref=='center' else np.linspace(0, 5, num=50)
             ax.plot(x_eval, dist['kde'][ref](x_eval))
         
-        elif show == 'hist-type-proportion':
-            counts = dist['hist-type-proportion'][0]
-            edges = dist['hist-type-proportion'][1]
+        elif show == 'hist-proportion':
+            counts = dist['hist-proportion'][0]
+            edges = dist['hist-proportion'][1]
             
             ax.stairs(counts, edges, fill=True, alpha=0.65, 
                       edgecolor='black', linewidth=0.8)
@@ -311,7 +312,8 @@ def plot_distribution(distrib, show='hist-type-proportion',
                 ax.set_xlim(global_x_min - x_margin, global_x_max + x_margin)
                 ax.set_ylim(0, global_y_max * 1.1) """
         else:
-            ax.set_title(f"Lame {sld_name}", fontsize=11, color='#999999', style='italic')
+            title = sld_name if 'UTC' not in sld_name else sld_name.split('UTC')[0]
+            ax.set_title(f"Lame {title}", fontsize=11, color='#999999', style='italic')
             for spine in ax.spines.values():
                 spine.set_visible(True)
                 spine.set_color('#dddddd')

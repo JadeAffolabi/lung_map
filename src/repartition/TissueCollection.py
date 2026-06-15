@@ -4,6 +4,8 @@ import numpy as np
 from scipy.ndimage import find_objects
 import numpy as np
 import pandas as pd
+from shapely.geometry import LineString, MultiPoint, Point
+from shapely import get_parts
 from scipy.ndimage import distance_transform_edt
 from scipy.spatial import distance
 from scipy import stats
@@ -149,10 +151,10 @@ class TissueCollection:
                     border, center."""
                 )
 
-    def compute_normalize_distance(self, bed_mask, bed_center, pixels_coord, local_ratio = True):
+    def compute_normalize_distance_old(self, bed_mask, bed_center, pixels_coord, local_ratio = True):
         bed_contour, _ = cv2.findContours(bed_mask.astype(np.uint8), 
                                         cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
-        
+
         # Squeeze contour to (N, 2) array [X, Y]
         b_coords = bed_contour[0].squeeze()
 
@@ -197,15 +199,220 @@ class TissueCollection:
             # 6. Calculate the final ratio
             # Prevent division by zero if the center is directly on a boundary edge
             r_boundary = np.where(r_boundary == 0, 1e-9, r_boundary)
+
+            # Pour les pixels dans le masque, r_boundary ne peut pas être < p_dist
+            r_boundary = np.maximum(r_boundary, p_dist)
+
+
+            ratio = p_dist / r_boundary
         else:
             r_boundary = np.max(b_r)
-        
-        ratio = p_dist / r_boundary
+            ratio = p_dist / r_boundary
 
-        # Force the exact center pixel to be exactly 0.0
         ratio[p_dist == 0] = 0.0
 
+        """ problematic = ratio > 1
+
+        if problematic.any():
+            p_theta_prob = p_theta[problematic]
+            p_dist_prob  = p_dist[problematic]
+
+            angle_tol = np.deg2rad(0.5)  # tolérance angulaire
+            r_adaptive = np.zeros(problematic.sum())
+
+            for i, (theta_i, dist_i) in enumerate(zip(p_theta_prob, p_dist_prob)):
+                # Tous les points du contour proches de cet angle
+                diff = np.abs(b_theta_sorted - theta_i)
+                diff = np.minimum(diff, 2*np.pi - diff)
+                nearby = b_r_sorted[diff < angle_tol]
+
+                if len(nearby) > 0:
+                    nearby_sorted = np.sort(nearby)
+                    # Premier r >= p_dist
+                    idx = np.searchsorted(nearby_sorted, dist_i)
+                    if idx < len(nearby_sorted):
+                        r_adaptive[i] = nearby_sorted[idx]
+                    else:
+                        r_adaptive[i] = nearby_sorted[-1]  # vraiment hors du masque
+
+            ratio[problematic] = p_dist_prob / np.where(r_adaptive == 0, 1e-9, r_adaptive) """
+    
         return ratio
+    
+    def _raycast_r_boundary(self, cx, cy, p_dx_i, p_dy_i, p_dist_i, contour_line, r_max):
+        norm = np.hypot(p_dx_i, p_dy_i)
+        if norm == 0:
+            return None
+        dx_n, dy_n = p_dx_i / norm, p_dy_i / norm
+
+        far_x = cx + dx_n * r_max * 2
+        far_y = cy + dy_n * r_max * 2
+
+        ray = LineString([(cx, cy), (far_x, far_y)])
+        intersection = ray.intersection(contour_line)
+
+        if intersection.is_empty:
+            return None
+
+        # Extraire tous les points d'intersection quel que soit le type
+        pts = []
+        for geom in get_parts(intersection):
+            if geom.geom_type == 'Point':
+                pts.append((geom.x, geom.y))
+            elif hasattr(geom, 'coords'):
+                pts.extend(geom.coords)
+
+        if not pts:
+            return None
+
+        dists = [np.hypot(x - cx, y - cy) for x, y in pts]
+        valid = [d for d in dists if d >= p_dist_i - 1e-6]
+
+        return min(valid) if valid else None
+    
+    def _raycast_all(self, cx, cy, p_dx_prob, p_dy_prob, p_dist_prob, b_coords):
+        """
+        Ray casting vectorisé sur les segments du contour.
+        Pour chaque pixel problématique, trouve la première intersection
+        du rayon (centre → pixel) avec le contour, au-delà du pixel.
+        """
+        # Segments du contour : A → B
+        A = b_coords[:-1]                          # (N, 2)
+        B = b_coords[1:]                           # (N, 2)
+        # Fermer le contour
+        A = np.vstack([A, b_coords[-1:]])
+        B = np.vstack([B, b_coords[:1]])
+        AB = B - A                                 # vecteurs de segments (N, 2)
+
+        n_prob = len(p_dx_prob)
+        r_corrected = np.full(n_prob, np.nan)
+
+        for i in range(n_prob):
+            dx, dy = p_dx_prob[i], p_dy_prob[i]
+            norm = np.hypot(dx, dy)
+            if norm == 0:
+                continue
+            # Direction unitaire du rayon
+            dx_n, dy_n = dx / norm, dy / norm
+
+            # Vecteur centre → A pour chaque segment
+            OA = A - np.array([cx, cy])            # (N, 2)
+
+            # Intersection rayon/segment par la règle de Cramer :
+            # t = distance le long du rayon jusqu'à l'intersection
+            # s = position sur le segment [0, 1]
+            denom = dx_n * AB[:, 1] - dy_n * AB[:, 0]   # (N,)
+
+            valid_denom = np.abs(denom) > 1e-10
+            t = np.full(len(A), np.inf)
+            s = np.full(len(A), np.inf)
+
+            t[valid_denom] = (OA[valid_denom, 0] * AB[valid_denom, 1]
+                            - OA[valid_denom, 1] * AB[valid_denom, 0]) / denom[valid_denom]
+            s[valid_denom] = (OA[valid_denom, 0] * dy_n
+                            - OA[valid_denom, 1] * dx_n) / denom[valid_denom]
+
+            # Intersection valide : t >= p_dist (devant le pixel) et s ∈ [0, 1]
+            valid = (t >= p_dist_prob[i] - 1e-6) & (s >= -1e-6) & (s <= 1 + 1e-6)
+
+            if valid.any():
+                r_corrected[i] = t[valid].min()
+
+        return r_corrected
+
+
+    def compute_normalize_distance(self, bed_mask, bed_center, pixels_coord, local_ratio=True):
+        bed_contour, _ = cv2.findContours(
+            bed_mask.astype(np.uint8),
+            cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE
+        )
+        b_coords = bed_contour[0].squeeze()
+        cx, cy = bed_center[1], bed_center[0]
+
+        # Coordonnées polaires du contour
+        b_dx = b_coords[:, 0] - cx
+        b_dy = b_coords[:, 1] - cy
+        b_theta = np.arctan2(b_dy, b_dx)
+        b_r = np.hypot(b_dx, b_dy)
+
+        # Coordonnées polaires des pixels
+        p_x = pixels_coord[:, 1]
+        p_y = pixels_coord[:, 0]
+        p_dx = p_x - cx
+        p_dy = p_y - cy
+        p_theta = np.arctan2(p_dy, p_dx)
+        p_dist = np.hypot(p_dx, p_dy)
+
+        if local_ratio:
+            # Tri par (theta, r) pour l'interpolation
+            sort_idx = np.lexsort((b_r, b_theta))
+            b_theta_sorted = b_theta[sort_idx]
+            b_r_sorted = b_r[sort_idx]
+
+            # Angles uniques + raccordement cyclique
+            unique_mask = np.append([True], b_theta_sorted[1:] != b_theta_sorted[:-1])
+            theta_unique = b_theta_sorted[unique_mask]
+            r_unique = b_r_sorted[unique_mask]
+            theta_unique = np.concatenate(([theta_unique[0] - 2*np.pi],
+                                            theta_unique,
+                                        [theta_unique[-1] + 2*np.pi]))
+            r_unique = np.concatenate(([r_unique[0]], r_unique, [r_unique[-1]]))
+
+            # Interpolation polaire
+            r_boundary = np.interp(p_theta, theta_unique, r_unique)
+            safe_r = np.where(r_boundary == 0, 1e-9, r_boundary)
+            ratio = p_dist / safe_r
+
+            # --- Correction par ray casting pour les pixels problématiques ---
+            problematic = ratio > 1
+            n_prob = problematic.sum()
+
+            """ if n_prob > 0:
+                print(f"Ray casting sur {n_prob} pixels problématiques...")
+
+                # Contour comme polyligne Shapely (construit une seule fois)
+                contour_line = LineString(
+                    np.vstack([b_coords, b_coords[0]])  # ferme le contour
+                )
+                r_max = b_r.max()
+                prob_idx = np.where(problematic)[0]
+
+                corrected = 0
+                for i in prob_idx:
+                    r_true = self._raycast_r_boundary(
+                        cx, cy,
+                        p_dx[i], p_dy[i], p_dist[i],
+                        contour_line, r_max
+                    )
+                    if r_true is not None:
+                        ratio[i] = p_dist[i] / r_true
+                        corrected += 1
+                    # sinon on garde le ratio tel quel
+
+                still_over = (ratio[prob_idx] > 1).sum()
+                print(f"  Corrigés     : {corrected}")
+                print(f"  Encore > 1   : {still_over}") """
+            
+            if problematic.any():
+                prob_idx = np.where(problematic)[0]
+
+                r_corrected = self._raycast_all(
+                    cx, cy,
+                    p_dx[problematic], p_dy[problematic], p_dist[problematic],
+                    b_coords
+                )
+
+                # Appliquer les corrections trouvées
+                found = ~np.isnan(r_corrected)
+                ratio[prob_idx[found]] = p_dist[problematic][found] / r_corrected[found]
+
+        else:
+            r_max = np.max(b_r)
+            ratio = p_dist / r_max
+
+        ratio[p_dist == 0] = 0.0
+        return ratio
+
     
     def _compute_distribution(self, kind, distances):
         nb_pxl = len(distances)
@@ -221,7 +428,8 @@ class TissueCollection:
                 hist, kde."""
             )
 
-    def get_distribution(self, bed_mask, ref="border", bed_center=None, kind='kde', norm_dist=True):
+    def get_distribution(self, bed_mask, ref="border", bed_center=None,
+                        kind='kde', norm_dist=True, local_ratio=True):
         tissues_pxl_coord = np.argwhere(self.mask)
 
         if ref == 'border':
@@ -238,7 +446,7 @@ class TissueCollection:
             assert bed_center is not None, "bed_center should not be None."
             if norm_dist:
                 dist_to_bed_center = self.compute_normalize_distance(bed_mask, bed_center,
-                                                                      tissues_pxl_coord)
+                                                                      tissues_pxl_coord, local_ratio)
             else:
                 dist_to_bed_center = [distance.euclidean(bed_center, coord) * (PIXEL_SIZE/1e3)
                                        for coord in tissues_pxl_coord]

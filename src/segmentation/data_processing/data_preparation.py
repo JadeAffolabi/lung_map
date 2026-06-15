@@ -105,6 +105,8 @@ def patient_level_split(data_paths: DataPaths, train_ratio=0.8,
         val_patients = set(list(train_patients)[:split_idx])
     else:
         val_patients = set()
+    
+    train_patients -= val_patients
 
     train_dict = {'img_paths': [], 'mask_paths': []}
     val_dict = {'img_paths': [], 'mask_paths': []}
@@ -164,7 +166,8 @@ def merge_split(datapaths, train_ratio=0.8, val_ratio=None):
         train_dict, test_dict, val_dict = patient_level_split(d, train_ratio, val_ratio)
         train_dict_list.append(train_dict)
         test_dict_list.append(test_dict)
-        val_dict_list.append(val_dict) if val_ratio else None
+        if val_ratio:
+            val_dict_list.append(val_dict)
     
     final_train_dict = merge_dict_of_list(train_dict_list)
     final_test_dict = merge_dict_of_list(test_dict_list)
@@ -411,7 +414,7 @@ if __name__ == '__main__':
 
     start = time.time()
     parser = argparse.ArgumentParser()
-    parser.add_argument("zip_path", help="Path the files of the raw data", type=str)
+    parser.add_argument('-z', '--zip_path', help="Path the files of the raw data", type=str)
     args = parser.parse_args()
 
     path_to_zip = args.zip_path
@@ -444,10 +447,11 @@ if __name__ == '__main__':
 
     if val_dict:
         create_dataset_shards(
-        'val',
-        val_dict,
-        str(PATH_SEG_DATA) + '/data-shards'
+            'val',
+            val_dict,
+            str(PATH_SEG_DATA) + '/data-shards'
         )
+
     end = time.time()
     shutil.rmtree(RAW_DATA_DIR)
     print("Done.")
