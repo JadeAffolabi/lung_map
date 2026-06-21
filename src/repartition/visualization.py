@@ -230,11 +230,7 @@ def export_tissues_proportion(all_tissues_areas, output='tissues_proportion.pdf'
         d = pdf.infodict()
         d["Title"]   = "Visualization tissue proportion per slide"
 
-<<<<<<< HEAD
 def plot_distribution(distrib, show='hist-proportion',
-=======
-def plot_distribution(distrib, show='hist-type-proportion',
->>>>>>> 9300ffb01a496fef7480fe10e3e5a8767a81c295
                        ref='center', figsize=(12, 8), 
                        suptitle="Titre Général",
                        xlabel="Valeurs de x", 
@@ -271,12 +267,8 @@ def plot_distribution(distrib, show='hist-type-proportion',
         ax = axes[i]
         dist = distrib[sld_name]
 
-<<<<<<< HEAD
         title = sld_name if 'UTC' not in sld_name else sld_name.split('UTC')[0]
-        ax.set_title(f"Lame {title}", fontsize=12, fontweight='bold', pad=8)
-=======
-        ax.set_title(f"Lame {sld_name}", fontsize=12, fontweight='bold', pad=8)
->>>>>>> 9300ffb01a496fef7480fe10e3e5a8767a81c295
+        ax.set_title(f"{title}", fontsize=12, fontweight='bold', pad=8)
         ax.set_xlabel(xlabel, fontsize=10, color='#444444')
         ax.set_ylabel(ylabel, fontsize=10, color='#444444')
         
@@ -304,21 +296,12 @@ def plot_distribution(distrib, show='hist-type-proportion',
                 #ax.set_ylim(0, global_y_max * 1.1)
 
         elif show == 'kde':
-<<<<<<< HEAD
             x_eval = np.linspace(0, 2, num=100) if ref=='center' else np.linspace(0, 5, num=50)
             ax.plot(x_eval, dist['kde'][ref](x_eval))
         
         elif show == 'hist-proportion':
             counts = dist['hist-proportion'][0]
             edges = dist['hist-proportion'][1]
-=======
-            x_eval = np.linspace(0, 1.5, num=50) if ref=='center' else np.linspace(0, 5, num=50)
-            ax.plot(x_eval, dist['kde'][ref](x_eval))
-        
-        elif show == 'hist-type-proportion':
-            counts = dist['hist-type-proportion'][0]
-            edges = dist['hist-type-proportion'][1]
->>>>>>> 9300ffb01a496fef7480fe10e3e5a8767a81c295
             
             ax.stairs(counts, edges, fill=True, alpha=0.65, 
                       edgecolor='black', linewidth=0.8)
@@ -329,12 +312,8 @@ def plot_distribution(distrib, show='hist-type-proportion',
                 ax.set_xlim(global_x_min - x_margin, global_x_max + x_margin)
                 ax.set_ylim(0, global_y_max * 1.1) """
         else:
-<<<<<<< HEAD
             title = sld_name if 'UTC' not in sld_name else sld_name.split('UTC')[0]
             ax.set_title(f"Lame {title}", fontsize=11, color='#999999', style='italic')
-=======
-            ax.set_title(f"Lame {sld_name}", fontsize=11, color='#999999', style='italic')
->>>>>>> 9300ffb01a496fef7480fe10e3e5a8767a81c295
             for spine in ax.spines.values():
                 spine.set_visible(True)
                 spine.set_color('#dddddd')
@@ -347,9 +326,8 @@ def plot_distribution(distrib, show='hist-type-proportion',
 
     plt.tight_layout()
 
-def plot_tumor_slide_grid(slides_annotations, figsize=(14,14)):
-    sld_tumors = [masks for _, masks in slides_annotations.items() if np.any(masks['tumor'])]
-    n = len(sld_tumors)
+def plot_slide_grid(slides, figsize=(14,14), title=None):
+    n = len(slides)
 
     cols = math.ceil(math.sqrt(n))
     rows = math.ceil(n / cols)
@@ -358,7 +336,7 @@ def plot_tumor_slide_grid(slides_annotations, figsize=(14,14)):
     axes = np.array(axes).flatten() if n > 1 else [axes]
 
 
-    for i, masks in enumerate(sld_tumors):
+    for i, masks in enumerate(slides):
         ax = axes[i]
         coords = np.argwhere(masks['tumor_bed'])
         y_min, x_min = coords.min(axis=0)
@@ -374,7 +352,9 @@ def plot_tumor_slide_grid(slides_annotations, figsize=(14,14)):
         ax.set_title(f'slide {i}', fontweight='bold')
         ax.axis('off')
 
-    for k in range(len(sld_tumors), len(axes)):
+    for k in range(len(slides), len(axes)):
         axes[k].axis('off')
-    fig.savefig('slides_tumeurs.png')
-
+    if title is None:
+        fig.savefig('slides_tumeurs.png')
+    else:
+        fig.savefig(title+'.png')

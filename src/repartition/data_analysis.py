@@ -1,3 +1,4 @@
+import math
 import warnings
 
 import cv2
@@ -25,6 +26,8 @@ def add_distance_info(data, tissues, tissue_type, slide_name):
                     'type': tissue_type,
                     'distance-border': obj['distance-border'],
                     'distance-center': obj['distance-center'] if tissues.is_tumoral else None,
+                    'max-dist-center': obj['max-dist-center'],
+                    'min-dist-center': obj['min-dist-center'],
                     'area': obj['area'],
                     'area-percentage': obj['area-percentage'],
                     'periph-coord': obj['peripherical-coord']
@@ -93,7 +96,10 @@ def get_tissues_data(slides_annotation, return_kde=False, return_hist=False, loc
             if np.any(masks[tissue_type]):
                 tissues = TissueCollection(tissue_type, masks[tissue_type])
                 tissues.compute_distance_to_bed_border(tumor_bed['mask'])
-                tissues.compute_peripheral_tumors_distance_to_center(tumor_bed['center'])
+                tissues.compute_peripheral_tumors_distance_to_center(
+                    tumor_bed['mask'],
+                    tumor_bed['center']
+                )
                 tissues.compute_area_percentage(tumor_bed['mask'])
 
                 distance_data = add_distance_info(distance_data, tissues, tissue_type, sld_name)
@@ -140,7 +146,7 @@ def get_furthest_tumors(geo_data, by='id-slide'):
 
 def get_closest_tumors(geo_data, by='id-slide'):
     tumor_geo = geo_data[geo_data['type']=='tumor']
-    result = tumor_geo.loc[tumor_geo.groupby(by)['distance-center'].idxmin()]
+    result = tumor_geo.loc[tumor_geo.groupby(by)['min-dist-center'].idxmin()]
     result.drop(columns=['periph-coord'], inplace=True)
     return result
 
@@ -172,7 +178,7 @@ def get_type_proportion_hist(all_tissues_dist, tissue_type='tumor'):
     proportion_per_bin = np.nan_to_num(proportion_per_bin)
     return proportion_per_bin, bins
 
-def extract_features(distribution_data, eval_points, bins, distance_data=None, slides_annot=None, only_distrib=True):
+def extract_features(distribution_data, eval_points, bins, distance_data, slides_annot):
     kde_list = []
     hist_prop_list = []
     other_feats = []
@@ -185,7 +191,6 @@ def extract_features(distribution_data, eval_points, bins, distance_data=None, s
         hist_prop_list.append(hist / hist.sum())
         assert np.all(distrib['hist-proportion'][1] == bins), "Number of bins mismatch."
 
-    if not only_distrib:
         assert (distance_data is not None) and (slides_annot is not None), "'distance_data' and 'slides_annot' must be given."
         all_tissue_areas = get_areas(distance_data)
 
@@ -196,21 +201,30 @@ def extract_features(distribution_data, eval_points, bins, distance_data=None, s
             for id_sld, masks in slides_annot.items() if np.any(masks['tumor'])
         ]
 
-        min_dist_border = get_furthest_tumors(distance_data)
-        tumor_border_dist = [
-            min_dist_border[(min_dist_border['id-slide']==id_sld)]['distance-border'].values[0]
+        dist_border_furthest_tum = get_furthest_tumors(distance_data)
+        min_dist_border = [
+            dist_border_furthest_tum[(dist_border_furthest_tum['id-slide']==id_sld)]['max-dist-center'].values[0]
             for id_sld, masks in slides_annot.items() if np.any(masks['tumor'])
         ]
 
-        other_feats = np.array([[contact**(0.5), areas] 
-                                for contact, areas in zip(
-                                    tumor_border_contact, 
-                                    sld_tumor_percentage, 
+        dist_center_closest_tum = get_closest_tumors(distance_data)
+        min_dist_center = [
+            dist_center_closest_tum[(dist_center_closest_tum['id-slide']==id_sld)]['min-dist-center'].values[0]
+            for id_sld, masks in slides_annot.items() if np.any(masks['tumor'])
+        ]
+
+        other_feats = np.array([[contact**(1/2), dist_border, dist_center] 
+                                for contact, dist_border, dist_center in zip(
+                                    tumor_border_contact,
+                                    min_dist_border,
+                                    min_dist_center, 
                                 )])
         scaler = StandardScaler()
         other_feats = scaler.fit_transform(other_feats)
 
-    return np.array(kde_list), np.array(hist_prop_list), other_feats
+    return np.array(kde_list), np.array(hist_prop_list), np.array(other_feats)
+
+
 
 def extract_features2(slides_annot, thresholds, distance_data, tissue_type='tumor'):
     tumor_border_percent = [
@@ -271,6 +285,63 @@ def extract_features2(slides_annot, thresholds, distance_data, tissue_type='tumo
         (tumor_border_percent**(0.5), center_neighborhood**(0.5))
     )
 
+
+def get_center_neighbor_ratio(slides_annot, threshold, tissue_type='tumor'):
+    
+    center_neighborhood = []
+    for sld_masks in slides_annot.values():
+        if np.any(sld_masks[tissue_type]):
+            try:
+                bed_center = find_center_edt_barycentre(sld_masks['tumor_bed'])[0]['center']
+            except IndexError as e:
+                continue
+            all_pixels_coord = np.argwhere(sld_masks['tumor_bed'])
+            tissue_pixels_coord = np.argwhere(sld_masks[tissue_type])
+
+            bed_contour, _ = cv2.findContours(
+                sld_masks['tumor_bed'].astype(np.uint8),
+                cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE
+            )
+            b_coords = bed_contour[0].squeeze()
+            cx, cy = bed_center[1], bed_center[0]
+
+            # Coordonnées polaires du contour
+            b_dx = b_coords[:, 0] - cx
+            b_dy = b_coords[:, 1] - cy
+            b_r = np.hypot(b_dx, b_dy)
+
+            p_x = tissue_pixels_coord[:, 1]
+            p_y = tissue_pixels_coord[:, 0]
+            p_dx = p_x - cx
+            p_dy = p_y - cy
+            p_dist = np.hypot(p_dx, p_dy)
+
+            a_x = all_pixels_coord[:, 1]
+            a_y = all_pixels_coord[:, 0]
+            a_dx = a_x - cx
+            a_dy = a_y - cy
+            a_dist = np.hypot(a_dx, a_dy)
+
+            r_max = np.max(b_r)
+            tissue_ratio = p_dist / r_max
+            all_ratio = a_dist / r_max
+
+            tissue_in_neighb = tissue_ratio <= threshold
+            all_in_neighb = all_ratio <= threshold
+            neighb_proportion = np.sum(tissue_in_neighb) / np.sum(all_in_neighb)
+            """ for r_thresh in thresholds:
+                in_neighb = ratio <= r_thresh
+                neighb_proportion.append(
+                    np.sum(in_neighb) / len(pixels_coord)
+                ) """
+            center_neighborhood.append(
+                neighb_proportion
+            )
+    
+    center_neighborhood = np.array(center_neighborhood)
+
+    return center_neighborhood
+
 def mixed_distance(hist1, hist2, feat1, feat2, alpha=0.6):
     d_hist = wasserstein_distance(hist1, hist2)
     d_feat = np.linalg.norm(feat1 - feat2)
@@ -325,18 +396,32 @@ def compute_distance_matrix(kde_arr, hist_arr, weights, eval_points, bins, addit
 
     return dist_matrix
 
-def compute_distance_matrix2(kde_arr, eval_points, tumor_border_contact):
+def compute_distance_matrix2(kde_arr, eval_points, 
+                             tumor_border_contact,
+                             tumor_border_dist,
+                             tumor_center_dist,
+    ):
     n = len(kde_arr)  
     dist_matrix = np.zeros((n, n))
+    vect = np.hstack(
+        (tumor_border_dist, tumor_center_dist)
+    )
     for i in range(n):
         for j in range(i+1, n):
             dist_matrix[i, j] = wasserstein_distance(
                eval_points, eval_points,
                kde_arr[i], kde_arr[j]
-            ) + (tumor_border_contact[i] - tumor_border_contact[j])**2
+            ) + abs(tumor_border_contact[i] - tumor_border_contact[j])**(2) \
+              + 0.0*abs(tumor_center_dist[i] - tumor_center_dist[j])**(1) \
+            #  + abs(tumor_border_dist[i] - tumor_border_dist[j])**(1/4) \
+
 
     for i in range(n):
         for j in range(i+1, n):
             dist_matrix[j, i] = dist_matrix[i, j]
 
     return dist_matrix
+
+def get_tumor_slides(slides_annotation):
+    return [masks for _, masks in slides_annotation.items() 
+            if np.any(masks['tumor'])]

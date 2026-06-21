@@ -87,13 +87,33 @@ class TissueCollection:
 
         self._tissues = result
 
-    def compute_peripheral_tumors_distance_to_center(self, bed_center):
+    def compute_peripheral_tumors_distance_to_center(self, bed_mask, bed_center):
         if self.is_tumoral:
             for t in self._tissues:
                 dist_centers = np.array([distance.euclidean(bed_center, pxl_coord) for pxl_coord in t['peripherical-coord']])
-                furthest_tum_pxl = np.argmax(dist_centers)
-                t.update({'distance-center': (dist_centers[furthest_tum_pxl] * PIXEL_SIZE) / 1e3})
-                t['peripherical-coord'] = t['peripherical-coord'][furthest_tum_pxl]
+                furthest_tum_pxl_idx = np.argmax(dist_centers)
+
+                max_dist = np.max(dist_centers)
+                furthest_tum_pxl_coord = t['peripherical-coord'][furthest_tum_pxl_idx, :]
+                norm_max_dist = self.compute_normalize_distance(bed_mask, bed_center, furthest_tum_pxl_coord, local_ratio=True)
+                t.update({'max-dist-center': norm_max_dist})
+
+                t.update({'distance-center': (dist_centers[furthest_tum_pxl_idx] * PIXEL_SIZE) / 1e3})
+                t['peripherical-coord'] = t['peripherical-coord'][furthest_tum_pxl_idx]
+
+                pxl_coord = np.argwhere(t['mask'])
+                all_dist_center = np.array([distance.euclidean(bed_center, coord) 
+                                            for coord in pxl_coord])
+                min_dist = np.min(all_dist_center)
+                min_dist_idx = np.argmin(all_dist_center)
+                closest_tum_pxl = pxl_coord[min_dist_idx]
+                norm_min_dist = self.compute_normalize_distance(bed_mask, bed_center, closest_tum_pxl, local_ratio=True)
+                t.update({'min-dist-center': norm_min_dist})
+        else:
+            for t in self._tissues:
+                t.update({'max-dist-center': None})
+                t.update({'min-dist-center': None})
+                
 
     def compute_distance_to_bed_border(self, bed_mask):
         mask = (bed_mask*255).astype(np.uint8)
@@ -238,37 +258,7 @@ class TissueCollection:
             ratio[problematic] = p_dist_prob / np.where(r_adaptive == 0, 1e-9, r_adaptive) """
     
         return ratio
-    
-    def _raycast_r_boundary(self, cx, cy, p_dx_i, p_dy_i, p_dist_i, contour_line, r_max):
-        norm = np.hypot(p_dx_i, p_dy_i)
-        if norm == 0:
-            return None
-        dx_n, dy_n = p_dx_i / norm, p_dy_i / norm
 
-        far_x = cx + dx_n * r_max * 2
-        far_y = cy + dy_n * r_max * 2
-
-        ray = LineString([(cx, cy), (far_x, far_y)])
-        intersection = ray.intersection(contour_line)
-
-        if intersection.is_empty:
-            return None
-
-        # Extraire tous les points d'intersection quel que soit le type
-        pts = []
-        for geom in get_parts(intersection):
-            if geom.geom_type == 'Point':
-                pts.append((geom.x, geom.y))
-            elif hasattr(geom, 'coords'):
-                pts.extend(geom.coords)
-
-        if not pts:
-            return None
-
-        dists = [np.hypot(x - cx, y - cy) for x, y in pts]
-        valid = [d for d in dists if d >= p_dist_i - 1e-6]
-
-        return min(valid) if valid else None
     
     def _raycast_all(self, cx, cy, p_dx_prob, p_dy_prob, p_dist_prob, b_coords):
         """
@@ -320,6 +310,43 @@ class TissueCollection:
 
         return r_corrected
 
+    def _get_center_border_dist(self, bed_mask, bed_center, pixels_coord, local_dist=True):
+        bed_contour, _ = cv2.findContours(
+            bed_mask.astype(np.uint8),
+            cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE
+        )
+        b_coords = bed_contour[0].squeeze()
+        cx, cy = bed_center[1], bed_center[0]
+
+        b_dx = b_coords[:, 0] - cx
+        b_dy = b_coords[:, 1] - cy
+        b_theta = np.arctan2(b_dy, b_dx)
+        b_r = np.hypot(b_dx, b_dy)
+
+        p_x = pixels_coord[:, 1]
+        p_y = pixels_coord[:, 0]
+        p_dx = p_x - cx
+        p_dy = p_y - cy
+        p_theta = np.arctan2(p_dy, p_dx)
+
+        if local_dist:
+            sort_idx = np.lexsort((b_r, b_theta))
+            b_theta_sorted = b_theta[sort_idx]
+            b_r_sorted = b_r[sort_idx]
+
+            unique_mask = np.append([True], b_theta_sorted[1:] != b_theta_sorted[:-1])
+            theta_unique = b_theta_sorted[unique_mask]
+            r_unique = b_r_sorted[unique_mask]
+            theta_unique = np.concatenate(([theta_unique[0] - 2*np.pi],
+                                            theta_unique,
+                                        [theta_unique[-1] + 2*np.pi]))
+            r_unique = np.concatenate(([r_unique[0]], r_unique, [r_unique[-1]]))
+
+            center_border_dist = np.interp(p_theta, theta_unique, r_unique)
+        else:
+            center_border_dist = np.max(b_r)
+    
+        return center_border_dist
 
     def compute_normalize_distance(self, bed_mask, bed_center, pixels_coord, local_ratio=True):
         bed_contour, _ = cv2.findContours(
@@ -329,27 +356,23 @@ class TissueCollection:
         b_coords = bed_contour[0].squeeze()
         cx, cy = bed_center[1], bed_center[0]
 
-        # Coordonnées polaires du contour
         b_dx = b_coords[:, 0] - cx
         b_dy = b_coords[:, 1] - cy
         b_theta = np.arctan2(b_dy, b_dx)
         b_r = np.hypot(b_dx, b_dy)
 
-        # Coordonnées polaires des pixels
-        p_x = pixels_coord[:, 1]
-        p_y = pixels_coord[:, 0]
+        p_x = pixels_coord[:, 1] if pixels_coord.ndim == 2 else np.array(pixels_coord[1])
+        p_y = pixels_coord[:, 0] if pixels_coord.ndim == 2 else np.array(pixels_coord[0])
         p_dx = p_x - cx
         p_dy = p_y - cy
         p_theta = np.arctan2(p_dy, p_dx)
         p_dist = np.hypot(p_dx, p_dy)
 
         if local_ratio:
-            # Tri par (theta, r) pour l'interpolation
             sort_idx = np.lexsort((b_r, b_theta))
             b_theta_sorted = b_theta[sort_idx]
             b_r_sorted = b_r[sort_idx]
 
-            # Angles uniques + raccordement cyclique
             unique_mask = np.append([True], b_theta_sorted[1:] != b_theta_sorted[:-1])
             theta_unique = b_theta_sorted[unique_mask]
             r_unique = b_r_sorted[unique_mask]
@@ -358,41 +381,12 @@ class TissueCollection:
                                         [theta_unique[-1] + 2*np.pi]))
             r_unique = np.concatenate(([r_unique[0]], r_unique, [r_unique[-1]]))
 
-            # Interpolation polaire
             r_boundary = np.interp(p_theta, theta_unique, r_unique)
             safe_r = np.where(r_boundary == 0, 1e-9, r_boundary)
             ratio = p_dist / safe_r
 
-            # --- Correction par ray casting pour les pixels problématiques ---
             problematic = ratio > 1
-            n_prob = problematic.sum()
 
-            """ if n_prob > 0:
-                print(f"Ray casting sur {n_prob} pixels problématiques...")
-
-                # Contour comme polyligne Shapely (construit une seule fois)
-                contour_line = LineString(
-                    np.vstack([b_coords, b_coords[0]])  # ferme le contour
-                )
-                r_max = b_r.max()
-                prob_idx = np.where(problematic)[0]
-
-                corrected = 0
-                for i in prob_idx:
-                    r_true = self._raycast_r_boundary(
-                        cx, cy,
-                        p_dx[i], p_dy[i], p_dist[i],
-                        contour_line, r_max
-                    )
-                    if r_true is not None:
-                        ratio[i] = p_dist[i] / r_true
-                        corrected += 1
-                    # sinon on garde le ratio tel quel
-
-                still_over = (ratio[prob_idx] > 1).sum()
-                print(f"  Corrigés     : {corrected}")
-                print(f"  Encore > 1   : {still_over}") """
-            
             if problematic.any():
                 prob_idx = np.where(problematic)[0]
 
@@ -402,7 +396,6 @@ class TissueCollection:
                     b_coords
                 )
 
-                # Appliquer les corrections trouvées
                 found = ~np.isnan(r_corrected)
                 ratio[prob_idx[found]] = p_dist[problematic][found] / r_corrected[found]
 
@@ -410,7 +403,6 @@ class TissueCollection:
             r_max = np.max(b_r)
             ratio = p_dist / r_max
 
-        ratio[p_dist == 0] = 0.0
         return ratio
 
     
