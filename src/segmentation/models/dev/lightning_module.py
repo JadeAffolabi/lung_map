@@ -508,35 +508,41 @@ class SegmentationModule(pl.LightningModule):
 
             warmup_scheduler = LambdaLR(optimizer, lr_lambda=warmup_lambda)
             list_scheduler.append(warmup_scheduler)
+        else:
+            if cfg.scheduler == 'plateau':
+                list_scheduler.append(
+                        ReduceLROnPlateau(
+                            optimizer,
+                            mode='min'
+                        )
+                )
 
         if cfg.scheduler == 'cosine':
-            scheduler = CosineAnnealingLR(
-                optimizer,
-                T_max=cfg.max_epochs - warmup_epochs,
-                eta_min=cfg.lr_encoder * 1e-2,  # [EXP] floor du LR
-            )
-                
-        elif cfg.scheduler == 'plateau':
-            scheduler = ReduceLROnPlateau(
-                optimizer,
-                mode='min'
+            list_scheduler.append(
+                CosineAnnealingLR(
+                    optimizer,
+                    T_max=cfg.max_epochs - warmup_epochs,
+                    eta_min=cfg.lr * 1e-2,  # [EXP] floor du LR
+                )
             )
             
         elif cfg.scheduler == 'poly':
-            scheduler = PolynomialLR(
-                optimizer,
-                total_iters = cfg.max_epochs - warmup_epochs,
-                power=0.9
+            list_scheduler.append(
+                PolynomialLR(
+                    optimizer,
+                    total_iters = cfg.max_epochs - warmup_epochs,
+                    power=0.9
+                )
             )
-            
+
         else:
-            scheduler = CosineAnnealingLR(
-                optimizer,
-                T_max=cfg.max_epochs - warmup_epochs,
-                eta_min=cfg.lr_encoder * 1e-2,  # [EXP] floor du LR
+            list_scheduler.append(
+                CosineAnnealingLR(
+                    optimizer,
+                    T_max=cfg.max_epochs - warmup_epochs,
+                    eta_min=cfg.lr * 1e-2,  # [EXP] floor du LR
+                )
             )
-    
-        list_scheduler.append(scheduler)
 
         schedulers = SequentialLR(
             optimizer,

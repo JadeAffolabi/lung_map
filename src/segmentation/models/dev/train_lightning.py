@@ -162,14 +162,14 @@ def main():
 
     cfg.training.num_workers       = 4
     cfg.training.batch_size        = 64
-    cfg.training.max_epochs        = 200
+    cfg.training.max_epochs        = 100
     cfg.training.warmup_epochs     = 0
     cfg.training.optimizer         = 'adamw'
     cfg.training.lr                = 1e-3
     cfg.training.weight_decay      = 0.0001
     cfg.training.scheduler         = 'cosine'
 
-    cfg.training.dropout           = 0.0
+    cfg.training.dropout           = 0.5
 
     cfg.training.loss_type         = "ce+dice"
     cfg.training.dice_weight       = 0.5
@@ -182,7 +182,7 @@ def main():
 
     # ── Module et DataModule ───────────────────────────────────────────────
 
-    """ datamodule = SegmentationDataModule2(
+    datamodule = SegmentationDataModule2(
         train_urls=get_path_shards('train'),
         val_urls=get_path_shards('val'),
         test_urls=get_path_shards('test'),
@@ -190,15 +190,15 @@ def main():
         common_train_urls=get_path_shards('train-common'),
         batch_size=cfg.training.batch_size, 
         num_workers=cfg.training.num_workers
-    ) """
+    )
 
-    datamodule = SegmentationDataModule(
-        train_urls=get_path_shards('train'),
+    """ datamodule = SegmentationDataModule(
+        train_urls=get_path_shards('train-full'),
         val_urls=get_path_shards('val'),
         test_urls=get_path_shards('test'),
         batch_size=cfg.training.batch_size, 
         num_workers=cfg.training.num_workers
-    )
+    ) """
 
     """ cfg.training.class_weights = get_class_weight(
         datamodule.train_dataloader(),

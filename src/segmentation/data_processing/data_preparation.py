@@ -425,31 +425,32 @@ if __name__ == '__main__':
     bcsspaths = BcssPaths()
 
     print("Merging and splitting datasets")
-    train_dict, test_dict, val_dict = merge_split([luadpaths, bcsspaths], train_ratio=0.8, val_ratio=0.2) 
+    train_dict, test_dict, val_dict = merge_split([luadpaths], train_ratio=0.9, val_ratio=0.1) 
     assert img_mask_correct_order(train_dict) \
         & img_mask_correct_order(test_dict) \
         & img_mask_correct_order(val_dict) \
         ,"Images and masks are not in correct order"
     
+    shard_dir = '/shards2'
 
     print("Creating shards")
     create_dataset_shards(
-        'train',
+        'train-full',
         train_dict,
-        str(PATH_SEG_DATA) + '/data-shards'
+        str(PATH_SEG_DATA) + shard_dir
     )
 
     create_dataset_shards(
         'test',
         test_dict,
-        str(PATH_SEG_DATA) + '/data-shards'
+        str(PATH_SEG_DATA) + shard_dir
     )
 
     if val_dict:
         create_dataset_shards(
             'val',
             val_dict,
-            str(PATH_SEG_DATA) + '/data-shards'
+            str(PATH_SEG_DATA) + shard_dir
         )
 
     end = time.time()

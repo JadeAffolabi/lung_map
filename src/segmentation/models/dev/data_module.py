@@ -332,8 +332,8 @@ class SegmentationDataModule2(pl.LightningDataModule):
             pin_memory=True
         )
 
-def get_path_shards(split: str):
-    path_to_shards = str(PATH_SEG_DATA / 'shards')
+def get_path_shards(split: str, shard_dir='/shards2'):
+    path_to_shards = str(PATH_SEG_DATA / shard_dir)
     return glob.glob(path_to_shards + f"/dataset-{split}-*.tar")
 
 if __name__ == "__main__":
