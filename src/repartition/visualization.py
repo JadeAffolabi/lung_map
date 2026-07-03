@@ -336,7 +336,8 @@ def plot_slide_grid(slides, figsize=(14,14), title=None):
     axes = np.array(axes).flatten() if n > 1 else [axes]
 
 
-    for i, masks in enumerate(slides):
+    for i, sld in enumerate(slides):
+        _, masks = sld
         ax = axes[i]
         coords = np.argwhere(masks['tumor_bed'])
         y_min, x_min = coords.min(axis=0)

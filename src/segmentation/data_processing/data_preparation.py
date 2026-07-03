@@ -6,7 +6,8 @@ import os
 import random
 import shutil
 import time
-
+from typing import Union
+import tifffile
 import cv2
 import glob
 import webdataset as wds
@@ -15,8 +16,10 @@ from zipfile import ZipFile
 import numpy as np
 from PIL import Image
 
-from src.segmentation.constants import RAW_DATA_DIR, DIR_BCSS, DIR_LUAD, \
+from src.segmentation.constants import RAW_DATA_DIR, DIR_BCSS, DIR_LUAD, DIR_LCHUR, \
 CLASS_CONVERSION_BCSS, CLASS_CONVERSION_LUAD, CLASSES_TO_LABELS, PATH_SEG_DATA
+from src.repartition.data_loading import tif_to_real_mask
+from src.segmentation.constants import CLASSES_TO_LABELS
 
 class DataPaths(ABC):
     img_paths: list
@@ -36,12 +39,14 @@ class LuadPaths(DataPaths):
         for split in ['val', 'test']:
             img_paths.extend(glob.glob(os.path.join(RAW_DATA_DIR, DIR_LUAD, split, "img", "*.png")))
             mask_paths.extend(glob.glob(os.path.join(RAW_DATA_DIR, DIR_LUAD, split, "mask", "*.png")))
+        img_paths.sort()
+        mask_paths.sort()
 
         for img_pth, msk_pth in zip(img_paths, mask_paths):
             img_name = os.path.splitext(os.path.basename(img_pth))[0]
             msk_name = os.path.splitext(os.path.basename(msk_pth))[0]
             assert img_name == msk_name, \
-            f"Misalignement of image ({img_pth}) and mask ({msk_pth})."
+            f"Misalignement of image ({img_name}) and mask ({msk_name})."
         return img_paths, mask_paths
     
     def extract_patient_id(self, filepath):
@@ -58,12 +63,14 @@ class BcssPaths(DataPaths):
     def _get_data_paths_bcss(self):
         img_paths = glob.glob(os.path.join(RAW_DATA_DIR, DIR_BCSS,  "rgbs_colorNormalized", "*.png"))
         mask_paths = glob.glob(os.path.join(RAW_DATA_DIR, DIR_BCSS, "masks", "*.png"))
+        img_paths.sort()
+        mask_paths.sort()
 
         for img_pth, msk_pth in zip(img_paths, mask_paths):
             img_name = os.path.splitext(os.path.basename(img_pth))[0]
             msk_name = os.path.splitext(os.path.basename(msk_pth))[0]
             assert img_name == msk_name, \
-            f"Misalignement of image ({img_pth}) and mask ({msk_pth})."
+            f"Misalignement of image ({img_name}) and mask ({msk_name})."
         return img_paths, mask_paths
 
     def extract_patient_id(self, filepath):
@@ -72,6 +79,30 @@ class BcssPaths(DataPaths):
         code_parts = tcga_barcode.split('-')
         if len(code_parts) >= 3 and code_parts[0] == 'TCGA':
             return "-".join(code_parts[:3]) 
+        return "UNKNOWN"
+
+class LchurPaths(DataPaths):
+    def __init__(self):
+        self.img_paths, self.mask_paths = self._get_data_paths_lchur()
+
+    def _get_data_paths_lchur(self):
+        img_paths = glob.glob(os.path.join(RAW_DATA_DIR, DIR_LCHUR, "imgs", "*.png"))
+        mask_paths = glob.glob(os.path.join(RAW_DATA_DIR, DIR_LCHUR, "masks", "*.tif"))
+        img_paths.sort()
+        mask_paths.sort()
+
+        for img_pth, msk_pth in zip(img_paths, mask_paths):
+            img_name = os.path.splitext(os.path.basename(img_pth))[0]
+            msk_name = os.path.splitext(os.path.basename(msk_pth))[0]
+            assert img_name == msk_name, \
+            f"Misalignement of image ({img_name}) and mask ({msk_name})."
+        return img_paths, mask_paths
+
+    def extract_patient_id(self, filepath):
+        filename = os.path.basename(filepath)
+        patient_id = filename.split('_')[0]
+        if 'P' in patient_id:
+            return patient_id
         return "UNKNOWN"
 
 def extract_from_zip(zip_dir):
@@ -297,37 +328,40 @@ def is_luad(img_path):
 def is_bcss(img_path):
     return 'tcga' in img_path.lower()
 
+def is_lchur(img_path):
+    return 'lchur' in img_path.lower()
+
 def is_partially_annot(mask):
     return np.any(mask == 0)
 
 def extract_patches(
     image: np.ndarray,
     mask: np.ndarray,
-    patch_size: int = 224,
+    patch_size: Union[int, None]=224,
     other_label: int = 0,
     min_valid_ratio: float = 0.1,
 ) -> list[dict]:
 
     H, W = mask.shape
     patches = []
+    if patch_size:
+        for y in range(0, H - patch_size + 1, patch_size):
+            for x in range(0, W - patch_size + 1, patch_size):
+                img_patch  = image[y : y+patch_size, x : x+patch_size]
+                mask_patch = mask [y : y+patch_size, x : x+patch_size]
 
-    for y in range(0, H - patch_size + 1, patch_size):
-        for x in range(0, W - patch_size + 1, patch_size):
-            img_patch  = image[y : y+patch_size, x : x+patch_size]
-            mask_patch = mask [y : y+patch_size, x : x+patch_size]
+                if np.mean(mask_patch != other_label) < min_valid_ratio:
+                    continue
 
-            if np.mean(mask_patch != other_label) < min_valid_ratio:
-                continue
-
-            patches.append({
-                "img"   : img_patch,
-                "mask"    : mask_patch,
-                "pos": (y, x),
-            })
+                patches.append({
+                    "img"   : img_patch,
+                    "mask"    : mask_patch,
+                    "pos": (y, x),
+                })
 
     return patches
 
-def data_adaptation(img, mask, img_path):
+def data_adaptation(img, mask, img_path, patch_size: Union[int, None]=224):
     result = []
 
     if is_luad(img_path):
@@ -339,7 +373,7 @@ def data_adaptation(img, mask, img_path):
         })
 
     if is_bcss(img_path):
-        if is_partially_annot:
+        if is_partially_annot(mask):
             img, mask = extract_annotated_region(
                 img,
                 mask,
@@ -350,7 +384,7 @@ def data_adaptation(img, mask, img_path):
         new_mask = adapt_mask(mask, CLASS_CONVERSION_BCSS)
 
         # BCSS magnification is 40x and LUAD is 10x
-        reduc_factor = 40 / 10
+        """ reduc_factor = 40 / 10
         old_size = new_mask.shape               # (H, W)
         size_10x = (                            # (W, H) for cv2
             int(old_size[1] / reduc_factor),
@@ -368,19 +402,31 @@ def data_adaptation(img, mask, img_path):
         )
 
         result = extract_patches(
-            img_10x, mask_10x, patch_size= 224,
+            img_10x, mask_10x, patch_size=patch_size,
             other_label=CLASSES_TO_LABELS['other'],
             min_valid_ratio=0.20
-        )
+        ) """
+        result.append({
+            "img": img,
+            "mask": new_mask,
+            "pos": None,
+        })
+    
+    if is_lchur(img_path):
+        result.append({
+            "img": img,
+            "mask": mask,
+            "pos": None,
+        })
 
     return result
 
 
 
-def create_dataset_shards(split_name, data_paths, out_dir, max_size=1e9):
+def create_dataset_shards(split_name, data_paths, out_dir, max_size=1e9, patch_size: Union[int, None]=224):
 
     os.makedirs(out_dir, exist_ok=True)
-    pattern = os.path.join(out_dir, f"dataset-{split_name}-%06d.tar")
+    pattern = os.path.join(out_dir, f"{split_name}-%06d.tar")
     
     with wds.writer.ShardWriter(pattern, maxsize=max_size) as sink:
         for img_path, mask_path in zip(
@@ -390,11 +436,21 @@ def create_dataset_shards(split_name, data_paths, out_dir, max_size=1e9):
             base_name = os.path.splitext(os.path.basename(img_path))[0].replace('.', '_')
     
             img = np.array(Image.open(img_path).convert("RGB"))
-            mask  = np.array(Image.open(mask_path).convert("P"))
+
+            if is_lchur(mask_path):
+                mask_tif = tifffile.imread(mask_path)
+                annotations = tif_to_real_mask(mask_tif)
+                mask = np.zeros((img.shape[0], img.shape[1]))
+                for cls in CLASSES_TO_LABELS:
+                    if cls != 'other':
+                        mask[annotations[cls] == 255] = CLASSES_TO_LABELS[cls]
+            else:
+                mask  = np.array(Image.open(mask_path).convert("P"))
+
             assert mask.shape[:2] == img.shape[:2], \
             f"Dimensions incohérentes image/masque \n{img_path}\n{mask_path}"
 
-            new_data = data_adaptation(img, mask, img_path)
+            new_data = data_adaptation(img, mask, img_path, patch_size=patch_size)
 
             for i, patch in enumerate(new_data):
                 key_name = f"{base_name}_yx_{patch['pos'][0]}_{patch['pos'][1]}" \
@@ -421,36 +477,46 @@ if __name__ == '__main__':
     print(f"Extracting data from {path_to_zip}")
     extract_from_zip(path_to_zip)
 
-    luadpaths = LuadPaths()
+    #luadpaths = LuadPaths()
     bcsspaths = BcssPaths()
+    #lchurpaths = LchurPaths()
 
     print("Merging and splitting datasets")
-    train_dict, test_dict, val_dict = merge_split([luadpaths], train_ratio=0.9, val_ratio=0.1) 
+    #train_dict, test_dict, val_dict = merge_split([luadpaths, bcsspaths], train_ratio=0.9, val_ratio=0.1)
+    train_ratio=0.9
+    val_ratio=0.1
+    train_dict, test_dict, val_dict = patient_level_split(bcsspaths, train_ratio, val_ratio)
+
     assert img_mask_correct_order(train_dict) \
         & img_mask_correct_order(test_dict) \
         & img_mask_correct_order(val_dict) \
         ,"Images and masks are not in correct order"
-    
-    shard_dir = '/shards2'
+
+    shard_dir = '/shards_bcss'
+    patch_size = None
 
     print("Creating shards")
+
     create_dataset_shards(
         'train-full',
         train_dict,
-        str(PATH_SEG_DATA) + shard_dir
+        str(PATH_SEG_DATA) + shard_dir,
+        patch_size=patch_size,
     )
 
     create_dataset_shards(
         'test',
         test_dict,
-        str(PATH_SEG_DATA) + shard_dir
+        str(PATH_SEG_DATA) + shard_dir,
+        patch_size=patch_size,
     )
 
     if val_dict:
         create_dataset_shards(
             'val',
             val_dict,
-            str(PATH_SEG_DATA) + shard_dir
+            str(PATH_SEG_DATA) + shard_dir,
+            patch_size=patch_size,
         )
 
     end = time.time()

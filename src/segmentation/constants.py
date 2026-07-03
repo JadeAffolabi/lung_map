@@ -42,5 +42,6 @@ PATH_SEG_DATA = PROJECT_ROOT / 'data' / 'segmentation'
 RAW_DATA_DIR =  str(PATH_SEG_DATA / 'raw_data')
 DIR_LUAD = 'LUAD-HistoSeg'
 DIR_BCSS = ""
+DIR_LCHUR = 'LCHUR'
 
 ACCESS_TOKEN = os.getenv('TOKEN_HUGGINGFACE')
