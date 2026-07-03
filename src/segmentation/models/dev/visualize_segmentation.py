@@ -13,9 +13,9 @@ import pytorch_lightning as pl
 from PIL import Image
 from torchvision import transforms
 from matplotlib.colors import ListedColormap
-from torchmetrics.functional.segmentation import dice_score
+import time
 
-
+from lightning_module import iou_per_sample_per_class
 from config import Config, EncoderConfig, DecoderConfig, TrainingConfig
 from data_module import SegmentationDataModule, get_path_shards
 from lightning_module import SegmentationModule
@@ -92,7 +92,7 @@ def overlay_mask(image_np: np.ndarray, mask_rgb: np.ndarray, alpha: float = 0.45
     return np.clip(overlay, 0, 255).astype(np.uint8)
 
 
-def plot_segmentation(images, gt_masks, pred_masks, batch_dices, output_dir, fig_name):
+def plot_segmentation(images, gt_masks, pred_masks, batch_iou, output_dir, fig_name):
 
     class_dict = {
         0: ("other", "c"),
@@ -109,7 +109,7 @@ def plot_segmentation(images, gt_masks, pred_masks, batch_dices, output_dir, fig
     vmin = 0
     vmax = len(class_dict) - 1
 
-    fig, axes = plt.subplots(len(images), 3, figsize=(8, 3 * len(images) + 1))
+    fig, axes = plt.subplots(len(images), 4, figsize=(8, 4 * len(images) + 1))
 
     for i in range(len(images)):
 
@@ -119,18 +119,17 @@ def plot_segmentation(images, gt_masks, pred_masks, batch_dices, output_dir, fig
         img_display = images[i].permute(1, 2, 0).numpy()
         gt_display = gt_masks[i].numpy()
         pred_display = pred_masks[i].numpy()
-        dices = batch_dices[i, :]
+        iou = batch_iou[i, :]
 
         # --- ATTENTION : GESTION DE LA NORMALISATION ---
         # Si vous avez utilisé A.Normalize (ImageNet) dans Albumentations, 
         # l'image aura des couleurs bizarres et des valeurs négatives.
         # Pour l'afficher correctement, on doit "dé-normaliser" visuellement :
-        """ if images.min() < 0:
+        if images.min() < 0:
             mean = np.array([0.485, 0.456, 0.406])
             std = np.array([0.229, 0.224, 0.225])
             img_display = std * img_display + mean
-            img_display = np.clip(img_display, 0, 1) """
-
+            img_display = np.clip(img_display, 0, 1)
 
         axes[i, 0].set_title("Image")
         axes[i, 0].imshow(img_display)
@@ -140,9 +139,14 @@ def plot_segmentation(images, gt_masks, pred_masks, batch_dices, output_dir, fig
         axes[i, 1].imshow(gt_display, cmap=custom_cmap, vmin=vmin, vmax=vmax)
         axes[i, 1].axis('off')
 
-        axes[i, 2].set_title(f"Prediction, Dice\n tumor: {dices[0]:.2f} | necrose: {dices[1]:.2f}\n | stroma: {dices[2]:.2f}")
+        axes[i, 2].set_title(f"Prediction, IoU\n tumor: {iou[0]:.2f} | necrose: {iou[1]:.2f}\n | stroma: {iou[2]:.2f}")
         axes[i, 2].imshow(pred_display, cmap=custom_cmap, vmin=vmin, vmax=vmax)
         axes[i, 2].axis('off')
+
+        axes[i, 3].set_title(f"Superposition \nde la prediction")
+        axes[i, 3].imshow(img_display)
+        axes[i, 3].imshow(pred_display, cmap=custom_cmap, vmin=vmin, vmax=vmax, alpha=0.5)
+        axes[i, 3].axis('off')
 
     patches = []
     n = 4
@@ -158,62 +162,6 @@ def plot_segmentation(images, gt_masks, pred_masks, batch_dices, output_dir, fig
     plt.savefig(save_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
 
-def visualize_sample(
-    image_np: np.ndarray,
-    pred_mask: np.ndarray,
-    gt_mask: np.ndarray,
-    n_classes: int,
-    image_name: str,
-    output_dir: Path,
-    class_names = None,
-):
-    """Crée et sauvegarde la figure de visualisation pour une image."""
-    pred_rgb = mask_to_rgb(pred_mask, n_classes)
-    pred_overlay = overlay_mask(image_np.copy(), pred_rgb)
-
-    has_gt = gt_mask is not None
-    ncols = 4 if has_gt else 3
-
-    fig, axes = plt.subplots(1, ncols, figsize=(5 * ncols, 5))
-    fig.suptitle(image_name, fontsize=13, fontweight="bold")
-
-    # Image originale
-    axes[0].imshow(image_np)
-    axes[0].set_title("Image")
-    axes[0].axis("off")
-
-    # Prédiction (masque coloré pur)
-    axes[1].imshow(pred_rgb)
-    axes[1].set_title("Masque prédit")
-    axes[1].axis("off")
-
-    # Superposition
-    axes[2].imshow(pred_overlay)
-    axes[2].set_title("Superposition")
-    axes[2].axis("off")
-
-    # Vérité terrain (optionnel)
-    if has_gt:
-        gt_rgb = mask_to_rgb(gt_mask, n_classes)
-        axes[3].imshow(gt_rgb)
-        axes[3].set_title("Vérité terrain")
-        axes[3].axis("off")
-
-    # Légende des classes
-    patches = []
-    n = n_classes if n_classes > 1 else 2
-    for i in range(n):
-        c = [v / 255 for v in COLORS[i % len(COLORS)]]
-        label = class_names[i] if class_names and i < len(class_names) else f"Classe {i}"
-        patches.append(mpatches.Patch(color=c, label=label))
-    fig.legend(handles=patches, loc="lower center", ncol=min(n, 5),
-               bbox_to_anchor=(0.5, -0.05), fontsize=9)
-
-    plt.tight_layout()
-    save_path = output_dir / f"{Path(image_name).stem}_segmentation.png"
-    plt.savefig(save_path, dpi=150, bbox_inches="tight")
-    plt.close(fig)
-    print(f"  → Sauvegardé : {save_path}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -234,49 +182,66 @@ def run(args):
 
     model = load_model(args.checkpoint, device)
 
-    output_dir = Path(args.out_dir)
+    output_dir = Path(args.out)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     testloader = SegmentationDataModule(
         train_urls=get_path_shards('train'),
         val_urls=get_path_shards('val'),
-        test_urls=get_path_shards('test'),
+        test_urls=get_path_shards('shard512', shard_dir='shards_chu'),
         batch_size=4, 
         num_workers=0
     ).test_dataloader()
 
+    print('Prediction')
+
     i = 0
+    iou_accuml = []
     for images, masks in testloader:
 
         pred_masks = predict_batch(model, images, device)
         pred_masks = pred_masks.cpu()
-        batch_dice = dice_score(
-            pred_masks, masks, num_classes=4, average="none", input_format='index',
-            aggregation_level='samplewise', include_background=False,
-        )
         
+        batch_iou = iou_per_sample_per_class(pred_masks, masks, 4, ignore_index=0)
+        iou_accuml.append(batch_iou)
+
         fig_name = f'out_{i}'
         plot_segmentation(
             images,
             masks,
             pred_masks,
-            batch_dice,
-            args.out_dir,
+            batch_iou,
+            args.out,
             fig_name
         )
         i += 1
+    all_iou = torch.cat([x for x in iou_accuml], dim=0)
+    classes_score = all_iou.nanmean(dim=0)
+    classes_score_std = np.nanstd(all_iou.numpy(), axis=0)
 
-    print("Terminé. Résultats dans : {output_dir.resolve()}")
+    print(
+        f"tumor iou: {classes_score[0]} +/- {classes_score_std[0]}\n"
+        f"necrosis iou: {classes_score[1]} +/- {classes_score_std[1]}\n"
+        f"stroma iou: {classes_score[2]} +/- {classes_score_std[2]}\n"
+    )
+
+    print("Terminé.")
 
 
 
 def parse_args():
     p = argparse.ArgumentParser(description="Visualisation des segmentations UNet")
-    p.add_argument("--checkpoint",  required=True, help="Chemin vers le fichier .ckpt")
-    p.add_argument("--out_dir",  default="./segmentation_results",
+    p.add_argument("-ckpt", "--checkpoint",  required=True, help="Chemin vers le fichier .ckpt")
+    p.add_argument("--out",  default="./segmentation_results",
                    help="Dossier de sortie pour les visualisations")
     return p.parse_args()
 
 if __name__ == "__main__":
+
+    start = time.time()
+
     args = parse_args()
     run(args)
+
+    end = time.time()
+    print(f"Execution time : {(end - start)/60} min")

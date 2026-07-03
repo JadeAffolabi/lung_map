@@ -4,7 +4,7 @@ from src.segmentation.models.dev.unet_parts import *
 
 
 class UNet(nn.Module):
-    def __init__(self, n_channels, n_classes, bilinear=False, dropout=0.0):
+    def __init__(self, n_channels, n_classes, bilinear=False, dropout=0.5):
         super(UNet, self).__init__()
         self.n_channels = n_channels
         self.n_classes = n_classes
