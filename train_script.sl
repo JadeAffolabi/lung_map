@@ -11,6 +11,7 @@
 #   h200:8 (maximum) for gpu_h200
 #SBATCH --gres=gpu:a100:1
 
+
 # ----------------------------
 # processes / tasks
 #SBATCH -n 1
@@ -21,7 +22,7 @@
 #   gpu: until 16 cores / device
 #   hpda: until 16 cores / device
 #   gpu_h200: until 24 cores / device
-#SBATCH --cpus-per-task 8
+#SBATCH --cpus-per-task 12
 
 # ------------------------
 # Job time (hh:mm:ss)

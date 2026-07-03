@@ -1,25 +1,3 @@
-"""
-training/lightning_module.py — LightningModule de segmentation
-===============================================================
-Encapsule le modèle, l'optimisation et les métriques dans l'interface
-standard de PyTorch Lightning.
-
-Responsabilités :
-  • configure_optimizers : AdamW avec LR différenciés encodeur/décodeur
-                           + scheduler cosine avec warmup linéaire
-  • training_step        : forward + loss + log
-  • validation_step      : forward + métriques (Dice, IoU) + log
-  • on_validation_epoch_end : agrégation des métriques par époque
-
-Ce que Lightning gère automatiquement (vs train.py manuel) :
-  • Mixed precision       → Trainer(precision="16-mixed")
-  • Gradient clipping     → Trainer(gradient_clip_val=...)
-  • Boucles train/val     → plus de for epoch in range(...)
-  • Sauvegarde            → ModelCheckpoint callback
-  • Logging               → self.log() → WandB / TensorBoard / CSV
-  • Reproductibilité      → seed_everything()
-  • Multi-GPU             → Trainer(devices=N, strategy="ddp")
-"""
 
 import torch
 import torch.nn.functional as F
@@ -27,10 +5,11 @@ from torch.optim import AdamW, SGD
 from torch.optim.lr_scheduler import LambdaLR, CosineAnnealingLR, SequentialLR, ReduceLROnPlateau, PolynomialLR
 from pytorch_lightning.utilities.types import OptimizerLRScheduler
 import pytorch_lightning as pl
-from torchmetrics import JaccardIndex
+from torchmetrics.functional import jaccard_index
 from torchmetrics.segmentation import DiceScore
 from torchmetrics.functional.segmentation import dice_score
 from monai.metrics.hausdorff_distance import compute_hausdorff_distance
+import numpy as np
 
 from unet_model import UNet
 from segmentation_model import SegmentationModel, SegmentationModel2
@@ -39,6 +18,20 @@ import segmentation_models_pytorch as smp
 from losses import SegmentationLoss
 from config import Config
 from src.segmentation.constants import LABELS_TO_CLASSES
+
+def iou_per_sample_per_class(preds, targets, num_classes, ignore_index=None):
+    B = preds.shape[0]
+    actual_num_classes = num_classes - 1 if ignore_index is not None else num_classes
+    ious = torch.full((B, actual_num_classes), float('nan'), device=preds.device)
+    for c in range(num_classes):
+        if c == ignore_index:
+            continue
+        inter = ((preds == c) & (targets == c)).sum(dim=(1, 2)).float()
+        union = ((preds == c) | (targets == c)).sum(dim=(1, 2)).float()
+        present = union > 0
+        cls_idx = c - 1 if ((ignore_index is not None) and (ignore_index < c)) else c
+        ious[present, cls_idx] = inter[present] / union[present]
+    return ious 
 
 class SegmentationModuleFM(pl.LightningModule):
     """
@@ -109,17 +102,20 @@ class SegmentationModuleFM(pl.LightningModule):
 
     def _log_raw_scores(self, scores, score_name, prefix):
         classes_score = scores.nanmean(dim=0)
-        
-        # 1. On prépare un dictionnaire pour stocker les métriques
+        classes_score_std = np.nanstd(scores.numpy(), axis=0)
         metrics_to_log = {}
         
         for i, score in enumerate(classes_score):
-            # 2. Utilisation du "/" pour que le logger regroupe les courbes sur un seul graphique
             class_name = LABELS_TO_CLASSES[i+1]
             metrics_to_log[f'{prefix}/{prefix}_{score_name}_{class_name}'] = score
+            metrics_to_log[f'{prefix}/{prefix}_{score_name}_+std_{class_name}'] = score + classes_score_std[i]
+            metrics_to_log[f'{prefix}/{prefix}_{score_name}_-std_{class_name}'] = score - classes_score_std[i]
             
         global_score = classes_score.nanmean()
+        global_score_std = np.nanstd(global_score)
         metrics_to_log[f'{prefix}/{prefix}_{score_name}'] = global_score
+        metrics_to_log[f'{prefix}/{prefix}_{score_name}_+std'] = global_score + global_score_std
+        metrics_to_log[f'{prefix}/{prefix}_{score_name}_-std'] = global_score - global_score_std
 
         # 3. On log tout en une seule fois
         self.log_dict(
@@ -149,34 +145,43 @@ class SegmentationModuleFM(pl.LightningModule):
             aggregation_level='samplewise', include_background=False,
         )
 
+        batch_iou = iou_per_sample_per_class(preds, masks, 4)
+
         self.val_metric_accumul.append(
-            {"dice": batch_dice}
+            {
+                "dice": batch_dice,
+                "iou": batch_iou,
+            }
         )
 
         return losses['total']
     
     def on_validation_epoch_end(self):
         all_dice = torch.cat([x["dice"] for x in self.val_metric_accumul], dim=0)
+        all_iou = torch.cat([x["iou"] for x in self.val_metric_accumul], dim=0)
+
         self._log_raw_scores(scores=all_dice, score_name="dice", prefix="val")
+        self._log_raw_scores(scores=all_iou, score_name="iou", prefix="val")
+
         self.val_metric_accumul.clear()
 
     def test_step(self, batch, batch_idx):
         images, masks = batch
         
-        # 1. Passage dans le modèle
         outputs = self.model(images)
         preds = outputs["logits"].argmax(dim=1)
         
-        # 2. Calcul de la loss (optionnel en test, mais toujours utile à observer)
         losses = self.loss_fn(outputs, masks)
 
         batch_dice = dice_score(
             preds, masks, num_classes=4, average="none", input_format='index',
             aggregation_level='samplewise', include_background=False,
-        )        
+        )
+
+        batch_iou = iou_per_sample_per_class(preds, masks, 4)
+
         preds_one_hot = F.one_hot(preds, num_classes=4).permute(0, 3, 1, 2).float() 
         masks_one_hot = F.one_hot(masks, num_classes=4).permute(0, 3, 1, 2).float()
-
         batch_hd95 = compute_hausdorff_distance(
                 y_pred=preds_one_hot, 
                 y=masks_one_hot, 
@@ -186,6 +191,7 @@ class SegmentationModuleFM(pl.LightningModule):
         
         self.test_metric_accumul.append({
             'dice': batch_dice,
+            'iou': batch_iou,
             'hausdorff': batch_hd95,
         })
 
@@ -193,9 +199,11 @@ class SegmentationModuleFM(pl.LightningModule):
     
     def on_test_epoch_end(self):
         all_dice = torch.cat([x["dice"] for x in self.test_metric_accumul], dim=0)
+        all_iou = torch.cat([x["iou"] for x in self.test_metric_accumul], dim=0)
         all_hausdorff = torch.cat([x["hausdorff"] for x in self.test_metric_accumul], dim=0)
 
         self._log_raw_scores(scores=all_dice, score_name="dice", prefix="test")
+        self._log_raw_scores(scores=all_iou, score_name="iou", prefix="test")
         self._log_raw_scores(scores=all_hausdorff, score_name="hd95", prefix="test")
 
         self.test_metric_accumul.clear()
@@ -339,7 +347,7 @@ class SegmentationModule(pl.LightningModule):
         self.save_hyperparameters()  # sauvegarde cfg dans le checkpoint
 
         self.model = UNet(
-            n_channels=3,
+            n_channels=9,
             n_classes=4,
             bilinear=False,
             dropout=cfg.training.dropout,
@@ -352,10 +360,26 @@ class SegmentationModule(pl.LightningModule):
             decoder_interpolation='nearest',
             in_channels=3,
             classes=4,
-            activation=None, #after final conv layerq
+        ) """
+
+        """ self.model = smp.DeepLabV3Plus(
+            encoder_name='resnet34',
+            encoder_depth=5,
+            encoder_output_stride=16,
+            decoder_atrous_rates=[2, 4, 8],
+            decoder_aspp_separable=True,
+            decoder_aspp_dropout=0.5,
+            decoder_channels=256,
+            in_channels=9,
+            classes=4,
+            activation=None,
         ) """
 
         self.loss_fn = SegmentationLoss(cfg.training)
+        self.dice_score = DiceScore(
+            num_classes=4, average="none", input_format='index',
+            aggregation_level='samplewise', include_background=False,
+        )
 
         self.val_metric_accumul = []
         self.test_metric_accumul = []
@@ -382,15 +406,20 @@ class SegmentationModule(pl.LightningModule):
 
     def _log_raw_scores(self, scores, score_name, prefix):
         classes_score = scores.nanmean(dim=0)
-        
+        classes_score_std = np.nanstd(scores.cpu().numpy(), axis=0)
         metrics_to_log = {}
         
         for i, score in enumerate(classes_score):
             class_name = LABELS_TO_CLASSES[i+1]
             metrics_to_log[f'{prefix}/{prefix}_{score_name}_{class_name}'] = score
+            metrics_to_log[f'{prefix}/{prefix}_{score_name}_+std_{class_name}'] = score + classes_score_std[i]
+            metrics_to_log[f'{prefix}/{prefix}_{score_name}_-std_{class_name}'] = score - classes_score_std[i]
             
         global_score = classes_score.nanmean()
+        global_score_std = np.nanstd(global_score.cpu().numpy())
         metrics_to_log[f'{prefix}/{prefix}_{score_name}'] = global_score
+        metrics_to_log[f'{prefix}/{prefix}_{score_name}_+std'] = global_score + global_score_std
+        metrics_to_log[f'{prefix}/{prefix}_{score_name}_-std'] = global_score - global_score_std
 
         self.log_dict(
             metrics_to_log,
@@ -413,20 +442,28 @@ class SegmentationModule(pl.LightningModule):
 
         preds = outputs.argmax(dim=1)
 
+        #batch_dice = self.dice_score(preds, masks).unsqueeze(dim=0)
         batch_dice = dice_score(
-            preds, masks, num_classes=4, average="none", input_format='index',
-            aggregation_level='samplewise', include_background=False,
+            preds, masks, num_classes=4, average="none", input_format='index', include_background=False,
         )
+        batch_iou = iou_per_sample_per_class(preds, masks, 4, ignore_index=0)
 
         self.val_metric_accumul.append(
-            {"dice": batch_dice}
+            {
+                "dice": batch_dice,
+                "iou": batch_iou,
+            }
         )
 
         return loss
     
     def on_validation_epoch_end(self):
         all_dice = torch.cat([x["dice"] for x in self.val_metric_accumul], dim=0)
+        all_iou = torch.cat([x["iou"] for x in self.val_metric_accumul], dim=0)
+
         self._log_raw_scores(scores=all_dice, score_name="dice", prefix="val")
+        self._log_raw_scores(scores=all_iou, score_name="iou", prefix="val")
+
         self.val_metric_accumul.clear()
 
     def test_step(self, batch, batch_idx):
@@ -437,13 +474,14 @@ class SegmentationModule(pl.LightningModule):
         
         loss = self.loss_fn(outputs, masks)
 
+        #batch_dice = self.dice_score(preds, masks).unsqueeze(dim=0)
         batch_dice = dice_score(
-            preds, masks, num_classes=4, average="none", input_format='index',
-            aggregation_level='samplewise', include_background=False,
-        )        
+            preds, masks, num_classes=4, average="none", input_format='index', include_background=False,
+        )
+        batch_iou = iou_per_sample_per_class(preds, masks, 4, ignore_index=0)
+
         preds_one_hot = F.one_hot(preds, num_classes=4).permute(0, 3, 1, 2).float() 
         masks_one_hot = F.one_hot(masks, num_classes=4).permute(0, 3, 1, 2).float()
-
         batch_hd95 = compute_hausdorff_distance(
                 y_pred=preds_one_hot, 
                 y=masks_one_hot, 
@@ -453,6 +491,7 @@ class SegmentationModule(pl.LightningModule):
         
         self.test_metric_accumul.append({
             'dice': batch_dice,
+            'iou': batch_iou,
             'hausdorff': batch_hd95,
         })
 
@@ -460,9 +499,11 @@ class SegmentationModule(pl.LightningModule):
     
     def on_test_epoch_end(self):
         all_dice = torch.cat([x["dice"] for x in self.test_metric_accumul], dim=0)
+        all_iou = torch.cat([x["iou"] for x in self.test_metric_accumul], dim=0)
         all_hausdorff = torch.cat([x["hausdorff"] for x in self.test_metric_accumul], dim=0)
 
         self._log_raw_scores(scores=all_dice, score_name="dice", prefix="test")
+        self._log_raw_scores(scores=all_iou, score_name="iou", prefix="test")
         self._log_raw_scores(scores=all_hausdorff, score_name="hd95", prefix="test")
 
         self.test_metric_accumul.clear()
@@ -548,14 +589,14 @@ class SegmentationModule(pl.LightningModule):
             optimizer,
             schedulers=list_scheduler,
             milestones=[warmup_epochs] if warmup_epochs > 0 else [],
-        )
+        ) if cfg.scheduler != 'plateau' else list_scheduler[0]
 
         return {
             "optimizer": optimizer,
             "lr_scheduler": {
                 "scheduler": schedulers,
                 "interval": "epoch",   # step ou epoch
-                "monitor": "val_dice", # utilisé par ReduceLROnPlateau uniquement
+                "monitor": "val/val_loss", # utilisé par ReduceLROnPlateau uniquement
             },
         }
 

@@ -1,15 +1,3 @@
-"""
-training/data_module.py — LightningDataModule
-==============================================
-Encapsule la construction des datasets et dataloaders.
-Lightning appelle automatiquement setup() et les méthodes *_dataloader()
-au bon moment (avant fit, avant test, etc.).
-
-Avantages vs construction manuelle :
-  • setup(stage) : chargé une seule fois, partagé entre tous les workers DDP
-  • prepare_data  : téléchargement/vérification sur un seul process (rank 0)
-  • Compatible avec Trainer(devices=N) sans modification
-"""
 
 import glob
 from typing import Union
@@ -24,6 +12,10 @@ import numpy as np
 import io
 from PIL import Image
 from skimage.color import rgb2hed, hed2rgb
+import torch
+import torchvision.transforms.functional as TF
+import torch.nn.functional as F
+import random
 
 from src.segmentation.constants import PATH_SEG_DATA
 
@@ -33,6 +25,99 @@ def custom_decoder(key, data):
     elif key.endswith("mask.png"):
         return np.array(Image.open(io.BytesIO(data)).convert("P"))
     return None
+
+def multiscale_patch_generator(src, num_patches=5, base_size=224, mode='random',
+                               rare_class_ids=None, rare_class_prob=0.5,
+                               max_grid_patchs=50,
+                               ):
+    for key, img, mask in src:
+        if not isinstance(img, torch.Tensor):
+            img = TF.to_tensor(img)
+        if not isinstance(mask, torch.Tensor):
+            mask = torch.as_tensor(mask, dtype=torch.long)
+            if mask.ndim == 2:
+                mask = mask.unsqueeze(0) # Ajout de la dimension canal pour le mask
+
+        _, H, W = img.shape
+        half = base_size // 2
+
+        rare_pixels = None
+        if rare_class_ids:
+            mask_2d = mask.squeeze(0)  # [H, W]
+            rare_mask = torch.isin(mask_2d, torch.tensor(rare_class_ids))
+            ys, xs = torch.where(rare_mask)
+            if len(ys) > 0:
+                rare_pixels = torch.stack([ys, xs], dim=1)
+
+        for i in range(num_patches if mode in ['random', 'grid'] else 1):
+            if mode == 'random':
+                if rare_class_ids and random.random() < rare_class_prob:
+                    if len(rare_pixels) > 0:
+                        idx = random.randint(0, len(rare_pixels) - 1)
+                        center_y, center_x = rare_pixels[idx]
+                        center_y = int(np.clip(center_y, half, H - half))
+                        center_x = int(np.clip(center_x, half, W - half))
+                    else:
+                        center_y = random.randint(half, max(half, H - half))
+                        center_x = random.randint(half, max(half, W - half))
+                else:
+                    center_y = random.randint(half, max(half, H - half))
+                    center_x = random.randint(half, max(half, W - half))
+                centers = [(center_y, center_x)]
+            elif mode == 'grid':
+                step = base_size
+                centers = [
+                    (cy, cx)
+                    for cy in range(half, H - half, step)
+                    for cx in range(half, W - half, step)
+                ]
+
+                if max_grid_patchs is not None and len(centers) > max_grid_patchs:
+                    indices = np.linspace(0, len(centers) - 1, max_grid_patchs, dtype=int)
+                    centers = [centers[i] for i in indices]
+            else:
+                center_y, center_x = H // 2, W // 2
+                centers = [(center_y, center_x)]
+
+
+            def extract(tensor, cy, cx, size, is_mask=False):
+                top, bottom = cy - size // 2, cy + size // 2
+                left, right = cx - size // 2, cx + size // 2
+                pad_l = max(0, -left)
+                pad_r = max(0, right - W)
+                pad_t = max(0, -top)
+                pad_b = max(0, bottom - H)
+
+                pad_mode = 'constant' if is_mask else 'reflect'
+                padded = F.pad(
+                    tensor.unsqueeze(0).float(),
+                    (pad_l, pad_r, pad_t, pad_b),
+                    mode=pad_mode,
+                    value=0
+                ).squeeze(0)
+                
+                if is_mask:
+                    padded = padded.long()
+
+                cropped = TF.crop(padded, top + pad_t, left + pad_l, size, size)
+
+                
+                if size != base_size:
+                    cropped = TF.resize(
+                        cropped, 
+                        [base_size, base_size],                 
+                        interpolation=TF.InterpolationMode.NEAREST if is_mask else TF.InterpolationMode.BILINEAR,
+                        antialias=not is_mask
+                    )
+                return cropped
+
+            for center_y, center_x in centers:
+                s1 = extract(img, center_y, center_x, base_size, is_mask=False)
+                s2 = extract(img, center_y, center_x, base_size * 2, is_mask=False)
+                s3 = extract(img, center_y, center_x, base_size * 4, is_mask=False)
+                patch_mask = extract(mask, center_y, center_x, base_size, is_mask=True)
+
+                yield key, s1, s2, s3, patch_mask
 
 class HEDStainJitter(A.ImageOnlyTransform):
     def __init__(self, strength=0.05, p=0.5):
@@ -63,9 +148,11 @@ def get_wsi_transforms(mode: str):
         ),
         ToTensorV2(),
     ]
+    
+    target_mapping = {'image2': 'image', 'image3': 'image'}
 
     if mode == "eval":
-        return A.Compose(shared)
+        return A.Compose(shared, additional_targets=target_mapping)
 
     return A.Compose([
         A.HorizontalFlip(p=0.5),
@@ -87,50 +174,58 @@ def get_wsi_transforms(mode: str):
         # ── Artefacts scanner ──────────────────────────────────────────────────
         A.GaussianBlur(blur_limit=(3, 7), p=0.2),   # variation de mise au point
         *shared,
-    ])
+    ], additional_targets=target_mapping)
 
-def get_nb_elements(loader):
-    sample_count = 0
-    label_count = dict()
-    for images, masks in loader:
-        sample_count += len(images)
-        for m in masks:
-            labels, effs = np.unique(m, return_counts=True)
-            for l, eff in zip(labels, effs):
-                if l in label_count:
-                    label_count[l] += eff
-                else:
-                    label_count[l] = eff
+def get_class_weight_from_shards(shard_urls, num_classes, norm=True, square_root=False):
 
-    return sample_count, label_count
+    label_count = np.zeros(num_classes, dtype=np.int64)
 
-def get_class_weight(loader, norm=True, square_root=False):
-    _, label_count = get_nb_elements(loader)
-    total_pxl = np.sum(list(label_count.values()))
-    freq = {int(label): count/total_pxl for label, count in label_count.items()}
-    inv_feq = np.ones(len(freq))
+    dataset = (
+        wds.WebDataset(shard_urls, shardshuffle=False, empty_check=False)
+        .decode(custom_decoder)
+        .to_tuple("mask.png")
+    )
+
+    for (mask,) in dataset:
+        labels, counts = np.unique(mask, return_counts=True)
+        for l, c in zip(labels, counts):
+            if l < num_classes:
+                label_count[l] += c
+
+    return _compute_weights(label_count, norm, square_root)
+
+
+def _compute_weights(label_count, norm=True, square_root=False):
+    total = label_count.sum()
+    freq = label_count / total
+    
+    inv_freq = np.where(freq > 0, 1.0 / freq, 0.0)
+
     if norm:
-        for label in freq:
-            inv_feq[label] = 1/freq[label]
+        mean = inv_freq[inv_freq > 0].mean()
+        weights = inv_freq / mean
         if square_root:
-            weights = np.sqrt(inv_feq) / np.sqrt(inv_feq).mean()
-        else:
-            weights = inv_feq / inv_feq.mean()
+            weights = np.sqrt(weights)
     else:
-        weights = inv_feq
-    return weights
+        weights = inv_freq
+
+    return weights.astype(np.float32)
 
 class SegmentationDataModule(pl.LightningDataModule):
     def __init__(self, train_urls: Union[str, list[str]],
                  val_urls: Union[str, list[str]],
                  test_urls: Union[str, list[str]],
-                 batch_size: int = 32, num_workers: int = 4):
+                 n_images: int,
+                 batch_size: int = 32, num_workers: int = 4,
+                 patches_per_image_train: int = 10):
         super().__init__()
         self.train_urls = train_urls
         self.test_urls = test_urls
         self.val_urls = val_urls
+        self.n_images = n_images
         self.batch_size = batch_size
         self.num_workers = num_workers
+        self.patches_per_image_train = patches_per_image_train
 
         self.train_transform = get_wsi_transforms('train')
         self.eval_transform = get_wsi_transforms('eval')
@@ -146,23 +241,57 @@ class SegmentationDataModule(pl.LightningDataModule):
         
         return img_tensor, mask_tensor
 
+    def _process_sample_2(self, sample_tuple, is_train=True):
+        key, s1_tensor, s2_tensor, s3_tensor, mask_tensor = sample_tuple
+
+        s1_np = s1_tensor.permute(1, 2, 0).numpy()
+        s2_np = s2_tensor.permute(1, 2, 0).numpy()
+        s3_np = s3_tensor.permute(1, 2, 0).numpy()
+        mask_np = mask_tensor.squeeze(0).numpy()
+        
+        transform = self.train_transform if is_train else self.eval_transform
+        
+        augmented = transform(
+            image=s1_np, 
+            image2=s2_np, 
+            image3=s3_np, 
+            mask=mask_np
+        )
+        
+        img_multiscale_tensor = torch.cat([
+            augmented['image'], 
+            augmented['image2'], 
+            augmented['image3']
+        ], dim=0)
+        
+        mask_final_tensor = augmented['mask'].long() 
+        
+        return img_multiscale_tensor, mask_final_tensor
+
     def setup(self, stage=None):
         # Webdataset take care of it
         pass
 
     def train_dataloader(self):
-        n_train_samples = sum(1 for _ in wds.WebDataset(self.train_urls))
+        n_train_samples = self.n_images * self.patches_per_image_train
+
         dataset = (
             wds.WebDataset(
                 self.train_urls, 
                 nodesplitter=wds.split_by_node, 
-                shardshuffle=False,
+                shardshuffle=2,
                 empty_check=False
             )
-            .shuffle(1000)
             .decode(custom_decoder)
             .to_tuple("__key__", "image.png", "mask.png")
-            .map(lambda x: self._process_sample(x, is_train=True))
+            .compose(lambda src: multiscale_patch_generator(
+                src, 
+                num_patches=self.patches_per_image_train, 
+                mode='random',
+                rare_class_ids=[1, 2],
+                rare_class_prob=0.6,
+            ))
+            .map(lambda x: self._process_sample_2(x, is_train=True))
             .with_epoch(n_train_samples)
         )
 
@@ -183,7 +312,13 @@ class SegmentationDataModule(pl.LightningDataModule):
             )
             .decode(custom_decoder)
             .to_tuple("__key__", "image.png", "mask.png")
-            .map(lambda x: self._process_sample(x, is_train=False))
+            .compose(lambda src: multiscale_patch_generator(
+                src, 
+                num_patches=1, 
+                mode='grid',
+                max_grid_patchs=5,
+            ))
+            .map(lambda x: self._process_sample_2(x, is_train=False))
         )
 
         return DataLoader(
@@ -203,7 +338,13 @@ class SegmentationDataModule(pl.LightningDataModule):
             )
             .decode(custom_decoder)
             .to_tuple("__key__", "image.png", "mask.png")
-            .map(lambda x: self._process_sample(x, is_train=False))
+            .compose(lambda src: multiscale_patch_generator(
+                src, 
+                num_patches=1, 
+                mode='grid',
+                max_grid_patchs=5,
+            ))
+            .map(lambda x: self._process_sample_2(x, is_train=False))
         )
 
         return DataLoader(
@@ -332,9 +473,12 @@ class SegmentationDataModule2(pl.LightningDataModule):
             pin_memory=True
         )
 
-def get_path_shards(split: str, shard_dir='/shards2'):
-    path_to_shards = str(PATH_SEG_DATA / shard_dir)
-    return glob.glob(path_to_shards + f"/dataset-{split}-*.tar")
+def get_path_shards(split: str, shard_dir='shards', path=None):
+    if path is None:
+        path_to_shards = str(PATH_SEG_DATA / shard_dir)
+        return glob.glob(path_to_shards + f"/{split}-*.tar")
+    else:
+        return glob.glob(path)
 
 if __name__ == "__main__":
 

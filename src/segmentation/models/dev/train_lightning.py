@@ -15,7 +15,7 @@ from pytorch_lightning.loggers import WandbLogger, TensorBoardLogger
 
 from config import Config, EncoderConfig, DecoderConfig, TrainingConfig
 from lightning_module import SegmentationModule, SegmentationModuleFM
-from data_module import SegmentationDataModule, SegmentationDataModule2, get_path_shards, get_class_weight
+from data_module import SegmentationDataModule, SegmentationDataModule2, get_path_shards, get_class_weight_from_shards
 from src.segmentation.constants import ACCESS_TOKEN
 from huggingface_hub import login
 import torch
@@ -162,11 +162,11 @@ def main():
 
     cfg.training.num_workers       = 4
     cfg.training.batch_size        = 64
-    cfg.training.max_epochs        = 100
+    cfg.training.max_epochs        = 20
     cfg.training.warmup_epochs     = 0
     cfg.training.optimizer         = 'adamw'
-    cfg.training.lr                = 1e-3
-    cfg.training.weight_decay      = 0.0001
+    cfg.training.lr                = 1e-4
+    cfg.training.weight_decay      = 0.1
     cfg.training.scheduler         = 'cosine'
 
     cfg.training.dropout           = 0.5
@@ -182,7 +182,7 @@ def main():
 
     # ── Module et DataModule ───────────────────────────────────────────────
 
-    datamodule = SegmentationDataModule2(
+    """     datamodule = SegmentationDataModule2(
         train_urls=get_path_shards('train'),
         val_urls=get_path_shards('val'),
         test_urls=get_path_shards('test'),
@@ -190,21 +190,26 @@ def main():
         common_train_urls=get_path_shards('train-common'),
         batch_size=cfg.training.batch_size, 
         num_workers=cfg.training.num_workers
-    )
-
-    """ datamodule = SegmentationDataModule(
-        train_urls=get_path_shards('train-full'),
-        val_urls=get_path_shards('val'),
-        test_urls=get_path_shards('test'),
-        batch_size=cfg.training.batch_size, 
-        num_workers=cfg.training.num_workers
     ) """
 
-    """ cfg.training.class_weights = get_class_weight(
-        datamodule.train_dataloader(),
+    shard_dir = 'shards_bcss'
+    datamodule = SegmentationDataModule(
+        train_urls=get_path_shards('train-full', shard_dir),
+        val_urls=get_path_shards('val', shard_dir),
+        test_urls=get_path_shards('test', shard_dir),
+        n_images=122,
+        batch_size=cfg.training.batch_size, 
+        num_workers=cfg.training.num_workers,
+        patches_per_image_train=5,
+    )
+
+    cfg.training.class_weights = get_class_weight_from_shards(
+        get_path_shards('train-full', shard_dir),
+        num_classes=4,
         norm=True,
-        square_root=False,    
-    ).tolist() """
+        square_root=True,    
+    ).tolist()
+    print(cfg.training.class_weights)
 
     module = SegmentationModule(cfg)
 

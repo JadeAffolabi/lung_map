@@ -327,7 +327,7 @@ def extract_patches(
 
     return patches
 
-def data_adaptation(img, mask, img_path):
+def data_adaptation(img, mask, img_path, patch_size=224):
     result = []
 
     if is_luad(img_path):
@@ -368,7 +368,7 @@ def data_adaptation(img, mask, img_path):
         )
 
         result = extract_patches(
-            img_10x, mask_10x, patch_size= 224,
+            img_10x, mask_10x, patch_size=patch_size,
             other_label=CLASSES_TO_LABELS['other'],
             min_valid_ratio=0.20
         )
@@ -377,10 +377,10 @@ def data_adaptation(img, mask, img_path):
 
 
 
-def create_dataset_shards(split_name, data_paths, out_dir, max_size=1e9):
+def create_dataset_shards(split_name, data_paths, out_dir, max_size=1e9, patch_size=224):
 
     os.makedirs(out_dir, exist_ok=True)
-    pattern = os.path.join(out_dir, f"dataset-{split_name}-%06d.tar")
+    pattern = os.path.join(out_dir, f"{split_name}-%06d.tar")
     
     with wds.writer.ShardWriter(pattern, maxsize=max_size) as sink:
         for img_path, mask_path in zip(
@@ -394,7 +394,7 @@ def create_dataset_shards(split_name, data_paths, out_dir, max_size=1e9):
             assert mask.shape[:2] == img.shape[:2], \
             f"Dimensions incohérentes image/masque \n{img_path}\n{mask_path}"
 
-            new_data = data_adaptation(img, mask, img_path)
+            new_data = data_adaptation(img, mask, img_path, patch_size=patch_size)
 
             for i, patch in enumerate(new_data):
                 key_name = f"{base_name}_yx_{patch['pos'][0]}_{patch['pos'][1]}" \
@@ -425,32 +425,36 @@ if __name__ == '__main__':
     bcsspaths = BcssPaths()
 
     print("Merging and splitting datasets")
-    train_dict, test_dict, val_dict = merge_split([luadpaths], train_ratio=0.9, val_ratio=0.1) 
+    train_dict, test_dict, val_dict = merge_split([bcsspaths], train_ratio=0.9, val_ratio=0.1) 
     assert img_mask_correct_order(train_dict) \
         & img_mask_correct_order(test_dict) \
         & img_mask_correct_order(val_dict) \
         ,"Images and masks are not in correct order"
-    
-    shard_dir = '/shards2'
+
+    shard_dir = '/shards_bcss'
+    patch_size = 1024
 
     print("Creating shards")
     create_dataset_shards(
         'train-full',
         train_dict,
-        str(PATH_SEG_DATA) + shard_dir
+        str(PATH_SEG_DATA) + shard_dir,
+        patch_size=patch_size,
     )
 
     create_dataset_shards(
         'test',
         test_dict,
-        str(PATH_SEG_DATA) + shard_dir
+        str(PATH_SEG_DATA) + shard_dir,
+        patch_size=patch_size,
     )
 
     if val_dict:
         create_dataset_shards(
             'val',
             val_dict,
-            str(PATH_SEG_DATA) + shard_dir
+            str(PATH_SEG_DATA) + shard_dir,
+            patch_size=patch_size,
         )
 
     end = time.time()
