@@ -27,6 +27,7 @@ def custom_decoder(key, data):
     return None
 
 def extract_np(img_np, mask_np, cy, cx, size, base_size, H, W):
+    #print(f"Originales shapes:  img {img_np.shape}, mask {mask_np.shape if mask_np is not None else None}")
     half = size // 2
     top    = cy - half
     left   = cx - half
@@ -46,13 +47,15 @@ def extract_np(img_np, mask_np, cy, cx, size, base_size, H, W):
         if mask_np is not None:
             mask_np = np.pad(mask_np,
                              ((pad_t, pad_b), (pad_l, pad_r)),
-                             mode='constant', constant_values=0)
+                             mode='reflect')
 
     # Crop
     t = top + pad_t
     l = left + pad_l
+
     img_crop  = img_np[t:t+size, l:l+size, :]         # [size, size, 3] uint8
     mask_crop = mask_np[t:t+size, l:l+size] if mask_np is not None else None
+    #print(f"Crop shapes:  img {img_crop.shape}, mask {mask_crop.shape if mask_np is not None else None}")
 
     # Resize if needed
     if size != base_size:
@@ -69,12 +72,12 @@ def extract_np(img_np, mask_np, cy, cx, size, base_size, H, W):
 
 def multiscale_patch_generator(src, num_patches=5, base_size=224, mode='random',
                                rare_class_ids=None, rare_class_prob=0.5,
-                               max_grid_patchs=None):
+                               max_grid_patchs=None, images_size=[224]):
     for key, img, mask in src:
         img  = np.ascontiguousarray(img)   # HWC uint8
         mask = np.ascontiguousarray(mask)  # HW uint8
         H, W = img.shape[:2]
-        max_half = base_size*4 // 2
+        max_half = max(images_size) // 2
 
         # Rare pixels index — in numpy
         rare_pixels = None
@@ -108,13 +111,18 @@ def multiscale_patch_generator(src, num_patches=5, base_size=224, mode='random',
                 centers = [centers[i] for i in indices]
         else:
             centers = [(H // 2, W // 2)]
-
+        
         for cy, cx in centers:
-            s1, m = extract_np(img, mask, cy, cx, base_size,     base_size, H, W)
-            s2, _ = extract_np(img, None, cy, cx, base_size * 2, base_size, H, W)
-            s3, _ = extract_np(img, None, cy, cx, base_size * 4, base_size, H, W)
-
-            yield key, s1, s2, s3, m
+            out = [key]
+            m = None
+            for i, img_size in enumerate(images_size):
+                if i == 0:
+                    crop, m = extract_np(img, mask, cy, cx, img_size, images_size[0], H, W)
+                else:
+                    crop, _ = extract_np(img, mask, cy, cx, img_size, images_size[0], H, W)
+                out.append(crop)
+            out.append(m)
+            yield out
 
 class HEDStainJitter(A.ImageOnlyTransform):
     def __init__(self, strength=0.05, p=0.5):
@@ -171,7 +179,7 @@ def get_wsi_transforms(mode: str):
         ),
 
         # ── Couleur / coloration ───────────────────────────────────────────────
-        HEDStainJitter(strength=0.05, p=0.2),   # variation inter-scanner (priorité haute)
+        HEDStainJitter(strength=0.03, p=0.2),   # variation inter-scanner (priorité haute)
         # ── Artefacts scanner ──────────────────────────────────────────────────
         A.GaussianBlur(blur_limit=(3, 7), p=0.2),   # variation de mise au point
         *shared,
@@ -219,7 +227,7 @@ class SegmentationDataModule(pl.LightningDataModule):
                  n_images: int,
                  batch_size: int = 32, num_workers: int = 4,
                  patches_per_image_train: int = 10,
-                 multichannel=False,
+                 images_size=[224, 448],
                  ):
         super().__init__()
         self.train_urls = train_urls
@@ -229,7 +237,8 @@ class SegmentationDataModule(pl.LightningDataModule):
         self.batch_size = batch_size
         self.num_workers = num_workers
         self.patches_per_image_train = patches_per_image_train
-        self.multichannel = multichannel
+        self.multichannel = len(images_size) > 1 
+        self.images_size = images_size
 
         self.train_transform = get_wsi_transforms('train')
         self.eval_transform = get_wsi_transforms('eval')
@@ -246,23 +255,27 @@ class SegmentationDataModule(pl.LightningDataModule):
         return img_tensor, mask_tensor
 
     
-    def _process_sample_2(self, sample_tuple, is_train=True, multichannel=True):
-        key, s1_np, s2_np, s3_np, mask_np = sample_tuple
-
+    def _process_sample_2(self, sample_tuple, is_train=True):
         transform = self.train_transform if is_train else self.eval_transform
+        inputs = {}
+        for i, img in enumerate(sample_tuple):
+            if i == 0:
+                continue
+            if i == len(sample_tuple)-1:
+                inputs.update({"mask": img})
+            else:
+                i = "" if i==1 else i
+                inputs.update({f"image{i}": img})
 
         augmented = transform(
-            image=s1_np,
-            image2=s2_np,
-            image3=s3_np,
-            mask=mask_np
+            **inputs,
         )
 
-        img_multiscale_tensor = torch.cat([
-            augmented['image'],
-            augmented['image2'],
-            augmented['image3']
-        ], dim=0) if multichannel else augmented['image']
+        if not self.multichannel:
+            img_multiscale_tensor = augmented['image']
+        else:
+            aug_imgs = [augmented[key] for key in augmented if key != 'mask']
+            img_multiscale_tensor = torch.cat(aug_imgs, dim=0)
 
         return img_multiscale_tensor, augmented['mask'].long()
 
@@ -291,9 +304,10 @@ class SegmentationDataModule(pl.LightningDataModule):
                 mode='random',
                 rare_class_ids=[2],
                 rare_class_prob=0.6,
+                images_size=self.images_size,
             ))
+            .map(lambda x: self._process_sample_2(x, is_train=True))
             .shuffle(500)
-            .map(lambda x: self._process_sample_2(x, is_train=True, multichannel=self.multichannel))
             .with_epoch(n_train_samples)
         )
 
@@ -321,7 +335,7 @@ class SegmentationDataModule(pl.LightningDataModule):
                 mode='grid',
                 max_grid_patchs=5,
             ))
-            .map(lambda x: self._process_sample_2(x, is_train=False, multichannel=self.multichannel))
+            .map(lambda x: self._process_sample_2(x, is_train=False))
         )
 
         return DataLoader(
@@ -348,7 +362,7 @@ class SegmentationDataModule(pl.LightningDataModule):
                 mode='grid',
                 max_grid_patchs=5,
             ))
-            .map(lambda x: self._process_sample_2(x, is_train=False, multichannel=self.multichannel))
+            .map(lambda x: self._process_sample_2(x, is_train=False))
         )
 
         return DataLoader(
