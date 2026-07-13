@@ -11,7 +11,7 @@ from sklearn.manifold import MDS, TSNE
 
 from src.repartition.constants import CLASSES
 from src.repartition.geometry_funcs import find_center_edt_barycentre
-from src.repartition.TissueCollection import TissueCollection
+from src.repartition.TissueCollection import *
 
 def id_patient(slide_name):
     if 'BC' in slide_name:
@@ -41,7 +41,7 @@ def get_distribution(sld_tissues, tumor_bed,
     result = dict()
     all_tissues_dist = dict()
     for type, tissues in sld_tissues.items():
-        norm_dist_to_center = tissues.compute_normalize_distance(
+        norm_dist_to_center = compute_normalize_distance(
                 tumor_bed['mask'], tumor_bed['center'],
                 np.argwhere(tissues.mask), local_ratio=local_ratio,
         )
@@ -265,27 +265,42 @@ def extract_features2(slides_annot, thresholds, distance_data, tissue_type='tumo
             b_coords = bed_contour[0].squeeze()
             cx, cy = bed_center[1], bed_center[0]
 
-            # Coordonnées polaires du contour
+            
             b_dx = b_coords[:, 0] - cx
             b_dy = b_coords[:, 1] - cy
             b_r = np.hypot(b_dx, b_dy)
-
-            p_x = pixels_coord[:, 1]
-            p_y = pixels_coord[:, 0]
-            p_dx = p_x - cx
-            p_dy = p_y - cy
-            p_dist = np.hypot(p_dx, p_dy)
             r_max = np.max(b_r)
-            ratio = p_dist / r_max
+    
+            ratio = compute_normalize_distance(
+                sld_masks['tumor_bed'],
+                bed_center,
+                pixels_coord,
+                local_ratio=True
+            )
 
-            neighb_proportion = []
-            for r_thresh in thresholds:
-                in_neighb = ratio <= r_thresh
-                neighb_proportion.append(
-                    np.sum(in_neighb) / len(pixels_coord)
+            all_pixels_coord = np.argwhere(sld_masks['tumor_bed'])
+            a_x = all_pixels_coord[:, 1]
+            a_y = all_pixels_coord[:, 0]
+            a_dx = a_x - cx
+            a_dy = a_y - cy
+            a_dist = np.hypot(a_dx, a_dy)
+            all_ratio = a_dist / r_max
+
+            neighborhood = []
+            for i, r_thresh in enumerate(thresholds):
+                in_neighb = np.logical_and(thresholds[i-1] < ratio, ratio <= r_thresh) \
+                                if i != 0 else ratio <= r_thresh
+                all_in_neighb = np.logical_and(thresholds[i-1] < all_ratio, all_ratio <= r_thresh) \
+                                    if i != 0 else ratio <= r_thresh
+                """ neighborhood.append(
+                    np.sum(in_neighb) / np.sum(all_in_neighb)
+                ) """
+                neighborhood.append(
+                    1 if np.any(in_neighb) else 0
                 )
+
             center_neighborhood.append(
-                neighb_proportion
+                neighborhood
             )
     
     center_neighborhood = np.array(center_neighborhood)
@@ -298,7 +313,7 @@ def extract_features2(slides_annot, thresholds, distance_data, tissue_type='tumo
         return x**(1/2) + x**(2)
 
     return np.hstack(
-        (f_x(tumor_border_percent), f_x(min_dist_center), f_x(max_dist_center))
+        (f_x(tumor_border_percent), f_x(min_dist_center), f_x(max_dist_center), center_neighborhood)
         #(tumor_border_percent, min_dist_center, max_dist_center)
 
     )
@@ -426,8 +441,9 @@ def compute_distance_matrix2(kde_arr, eval_points,
             dist_matrix[i, j] = wasserstein_distance(
                eval_points, eval_points,
                kde_arr[i], kde_arr[j]
-            ) + 0*abs(tumor_border_contact[i] - tumor_border_contact[j])**(2) \
-              + 1*np.linalg.norm(vect[i] - vect[j], ord=2)
+            ) + 1*abs(tumor_border_contact[i] - tumor_border_contact[j])**(2) \
+              + 0*np.linalg.norm(vect[i][:3] - vect[j][:3], ord=2) \
+              #+ np.linalg.norm(vect[i][3:] - vect[j][3:])**(1/2)
               #+ 0.0*abs(tumor_center_dist[i] - tumor_center_dist[j])**(1) \
 
 

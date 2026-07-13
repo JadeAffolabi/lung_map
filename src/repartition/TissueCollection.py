@@ -509,3 +509,105 @@ class TissueCollection:
                     ''').strip()
             str_repr += "\n"
         return str_repr
+
+def compute_normalize_distance(bed_mask, bed_center, pixels_coord, local_ratio=True):
+        bed_contour, _ = cv2.findContours(
+            bed_mask.astype(np.uint8),
+            cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE
+        )
+        b_coords = bed_contour[0].squeeze()
+        cx, cy = bed_center[1], bed_center[0]
+
+        b_dx = b_coords[:, 0] - cx
+        b_dy = b_coords[:, 1] - cy
+        b_theta = np.arctan2(b_dy, b_dx)
+        b_r = np.hypot(b_dx, b_dy)
+
+        p_x = pixels_coord[:, 1] if pixels_coord.ndim == 2 else np.array(pixels_coord[1])
+        p_y = pixels_coord[:, 0] if pixels_coord.ndim == 2 else np.array(pixels_coord[0])
+        p_dx = p_x - cx
+        p_dy = p_y - cy
+        p_theta = np.arctan2(p_dy, p_dx)
+        p_dist = np.hypot(p_dx, p_dy)
+
+        if local_ratio:
+            sort_idx = np.lexsort((b_r, b_theta))
+            b_theta_sorted = b_theta[sort_idx]
+            b_r_sorted = b_r[sort_idx]
+
+            unique_mask = np.append([True], b_theta_sorted[1:] != b_theta_sorted[:-1])
+            theta_unique = b_theta_sorted[unique_mask]
+            r_unique = b_r_sorted[unique_mask]
+            theta_unique = np.concatenate(([theta_unique[0] - 2*np.pi],
+                                            theta_unique,
+                                        [theta_unique[-1] + 2*np.pi]))
+            r_unique = np.concatenate(([r_unique[0]], r_unique, [r_unique[-1]]))
+
+            r_boundary = np.interp(p_theta, theta_unique, r_unique)
+            safe_r = np.where(r_boundary == 0, 1e-9, r_boundary)
+            ratio = p_dist / safe_r
+
+            problematic = ratio > 1
+
+            if problematic.any():
+                prob_idx = np.where(problematic)[0]
+
+                r_corrected = raycast_all(
+                    cx, cy,
+                    p_dx[problematic], p_dy[problematic], p_dist[problematic],
+                    b_coords
+                )
+
+                found = ~np.isnan(r_corrected)
+                ratio[prob_idx[found]] = p_dist[problematic][found] / r_corrected[found]
+
+        else:
+            r_max = np.max(b_r)
+            ratio = p_dist / r_max
+
+        return ratio
+
+def raycast_all(cx, cy, p_dx_prob, p_dy_prob, p_dist_prob, b_coords):
+        # Segments du contour : A → B
+        A = b_coords[:-1]                          # (N, 2)
+        B = b_coords[1:]                           # (N, 2)
+        # Fermer le contour
+        A = np.vstack([A, b_coords[-1:]])
+        B = np.vstack([B, b_coords[:1]])
+        AB = B - A                                 # vecteurs de segments (N, 2)
+
+        n_prob = len(p_dx_prob)
+        r_corrected = np.full(n_prob, np.nan)
+
+        for i in range(n_prob):
+            dx, dy = p_dx_prob[i], p_dy_prob[i]
+            norm = np.hypot(dx, dy)
+            if norm == 0:
+                continue
+            # Direction unitaire du rayon
+            dx_n, dy_n = dx / norm, dy / norm
+
+            # Vecteur centre → A pour chaque segment
+            OA = A - np.array([cx, cy])            # (N, 2)
+
+            # Intersection rayon/segment par la règle de Cramer :
+            # t = distance le long du rayon jusqu'à l'intersection
+            # s = position sur le segment [0, 1]
+            denom = dx_n * AB[:, 1] - dy_n * AB[:, 0]   # (N,)
+
+            valid_denom = np.abs(denom) > 1e-10
+            t = np.full(len(A), np.inf)
+            s = np.full(len(A), np.inf)
+
+            t[valid_denom] = (OA[valid_denom, 0] * AB[valid_denom, 1]
+                            - OA[valid_denom, 1] * AB[valid_denom, 0]) / denom[valid_denom]
+            s[valid_denom] = (OA[valid_denom, 0] * dy_n
+                            - OA[valid_denom, 1] * dx_n) / denom[valid_denom]
+
+            # Intersection valide : t >= p_dist (devant le pixel) et s ∈ [0, 1]
+            valid = (t >= p_dist_prob[i] - 1e-6) & (s >= -1e-6) & (s <= 1 + 1e-6)
+
+            if valid.any():
+                r_corrected[i] = t[valid].min()
+
+        return r_corrected

@@ -384,7 +384,7 @@ def data_adaptation(img, mask, img_path, patch_size: Union[int, None]=224):
         new_mask = adapt_mask(mask, CLASS_CONVERSION_BCSS)
 
         # BCSS magnification is 40x and LUAD is 10x
-        """ reduc_factor = 40 / 10
+        reduc_factor = 40 / 10
         old_size = new_mask.shape               # (H, W)
         size_10x = (                            # (W, H) for cv2
             int(old_size[1] / reduc_factor),
@@ -401,14 +401,14 @@ def data_adaptation(img, mask, img_path, patch_size: Union[int, None]=224):
             interpolation=cv2.INTER_NEAREST
         )
 
-        result = extract_patches(
+        """ result = extract_patches(
             img_10x, mask_10x, patch_size=patch_size,
             other_label=CLASSES_TO_LABELS['other'],
             min_valid_ratio=0.20
         ) """
         result.append({
-            "img": img,
-            "mask": new_mask,
+            "img": img_10x,
+            "mask": mask_10x,
             "pos": None,
         })
     
@@ -492,7 +492,7 @@ if __name__ == '__main__':
         & img_mask_correct_order(val_dict) \
         ,"Images and masks are not in correct order"
 
-    shard_dir = '/shards_bcss'
+    shard_dir = '/shards_bcss10x'
     patch_size = None
 
     print("Creating shards")

@@ -5,6 +5,7 @@ slurm_out/
 *.png
 *.csv
 *.ckpt
+*.html
 
 .env
 __pycache__/
