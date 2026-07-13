@@ -87,9 +87,12 @@ class TrainingConfig:
     log_every_n_steps: int = 10
     fast_dev_run = False
 
+    # Models
+    n_channels: int = 3
+
 @dataclass
 class Config(Generic[EncoderCfg, DecoderCfg]):
-    #name: str
     encoder: EncoderCfg
     decoder: DecoderCfg
     training: TrainingConfig = field(default_factory=TrainingConfig)
+    name: str = 'Model'

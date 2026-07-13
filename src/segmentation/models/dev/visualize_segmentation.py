@@ -109,7 +109,7 @@ def plot_segmentation(images, gt_masks, pred_masks, batch_iou, output_dir, fig_n
     vmin = 0
     vmax = len(class_dict) - 1
 
-    fig, axes = plt.subplots(len(images), 4, figsize=(8, 4 * len(images) + 1))
+    fig, axes = plt.subplots(len(images), 4, figsize=(8, 2 * len(images)))
 
     for i in range(len(images)):
 
@@ -185,12 +185,16 @@ def run(args):
     output_dir = Path(args.out)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    shard_dir = 'shards'
     testloader = SegmentationDataModule(
-        train_urls=get_path_shards('train'),
-        val_urls=get_path_shards('val'),
-        test_urls=get_path_shards('shard512', shard_dir='shards_chu'),
-        batch_size=4, 
-        num_workers=0
+        train_urls=get_path_shards('train', shard_dir),
+        val_urls=get_path_shards('val', shard_dir),
+        test_urls=get_path_shards('test', shard_dir),
+        n_images=122,
+        batch_size=4,
+        num_workers=0,
+        patches_per_image_train=3,
+        multichannel=False
     ).test_dataloader()
 
     print('Prediction')

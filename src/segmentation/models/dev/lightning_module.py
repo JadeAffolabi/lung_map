@@ -5,9 +5,8 @@ from torch.optim import AdamW, SGD
 from torch.optim.lr_scheduler import LambdaLR, CosineAnnealingLR, SequentialLR, ReduceLROnPlateau, PolynomialLR
 from pytorch_lightning.utilities.types import OptimizerLRScheduler
 import pytorch_lightning as pl
-from torchmetrics.functional import jaccard_index
-from torchmetrics.segmentation import DiceScore
-from torchmetrics.functional.segmentation import dice_score
+#from torchmetrics.segmentation import DiceScore
+#from torchmetrics.functional.segmentation import dice_score
 from monai.metrics.hausdorff_distance import compute_hausdorff_distance
 import numpy as np
 
@@ -347,18 +346,18 @@ class SegmentationModule(pl.LightningModule):
         self.save_hyperparameters()  # sauvegarde cfg dans le checkpoint
 
         self.model = UNet(
-            n_channels=9,
+            n_channels=cfg.training.n_channels,
             n_classes=4,
             bilinear=False,
             dropout=cfg.training.dropout,
         )
 
-        """ self.model = smp.Unet(
-            encoder_name='resnet50',
+        """ self.model = smp.UnetPlusPlus(
+            encoder_name='resnet34',
             encoder_depth=5,
             encoder_weights='imagenet',
             decoder_interpolation='nearest',
-            in_channels=3,
+            in_channels=cfg.training.n_channels,
             classes=4,
         ) """
 
@@ -370,17 +369,18 @@ class SegmentationModule(pl.LightningModule):
             decoder_aspp_separable=True,
             decoder_aspp_dropout=0.5,
             decoder_channels=256,
-            in_channels=9,
+            in_channels=cfg.training.n_channels,
             classes=4,
             activation=None,
         ) """
 
         self.loss_fn = SegmentationLoss(cfg.training)
-        self.dice_score = DiceScore(
+        """ self.dice_score = DiceScore(
             num_classes=4, average="none", input_format='index',
             aggregation_level='samplewise', include_background=False,
-        )
+        ) """
 
+        self.train_metric_accumul = []
         self.val_metric_accumul = []
         self.test_metric_accumul = []
 
@@ -401,8 +401,21 @@ class SegmentationModule(pl.LightningModule):
         outputs = self.model(images)
         loss = self.loss_fn(outputs, masks)
 
+        preds = outputs.argmax(dim=1)
+        batch_iou = iou_per_sample_per_class(preds, masks, 4, ignore_index=0)
+
+        self.train_metric_accumul.append(
+            {
+                "iou": batch_iou,
+            }
+        )
         self.log("train/train_loss", loss, on_step=False, on_epoch=True)
         return loss
+    
+    def on_train_epoch_end(self):
+        all_iou = torch.cat([x["iou"] for x in self.train_metric_accumul], dim=0)
+        self._log_raw_scores(scores=all_iou, score_name="iou", prefix="train")
+        self.train_metric_accumul.clear()
 
     def _log_raw_scores(self, scores, score_name, prefix):
         classes_score = scores.nanmean(dim=0)
@@ -418,8 +431,6 @@ class SegmentationModule(pl.LightningModule):
         global_score = classes_score.nanmean()
         global_score_std = np.nanstd(global_score.cpu().numpy())
         metrics_to_log[f'{prefix}/{prefix}_{score_name}'] = global_score
-        metrics_to_log[f'{prefix}/{prefix}_{score_name}_+std'] = global_score + global_score_std
-        metrics_to_log[f'{prefix}/{prefix}_{score_name}_-std'] = global_score - global_score_std
 
         self.log_dict(
             metrics_to_log,
@@ -443,14 +454,14 @@ class SegmentationModule(pl.LightningModule):
         preds = outputs.argmax(dim=1)
 
         #batch_dice = self.dice_score(preds, masks).unsqueeze(dim=0)
-        batch_dice = dice_score(
+        """ batch_dice = dice_score(
             preds, masks, num_classes=4, average="none", input_format='index', include_background=False,
-        )
+        ) """
         batch_iou = iou_per_sample_per_class(preds, masks, 4, ignore_index=0)
 
         self.val_metric_accumul.append(
             {
-                "dice": batch_dice,
+                #"dice": batch_dice,
                 "iou": batch_iou,
             }
         )
@@ -458,10 +469,10 @@ class SegmentationModule(pl.LightningModule):
         return loss
     
     def on_validation_epoch_end(self):
-        all_dice = torch.cat([x["dice"] for x in self.val_metric_accumul], dim=0)
+        #all_dice = torch.cat([x["dice"] for x in self.val_metric_accumul], dim=0)
         all_iou = torch.cat([x["iou"] for x in self.val_metric_accumul], dim=0)
 
-        self._log_raw_scores(scores=all_dice, score_name="dice", prefix="val")
+        #self._log_raw_scores(scores=all_dice, score_name="dice", prefix="val")
         self._log_raw_scores(scores=all_iou, score_name="iou", prefix="val")
 
         self.val_metric_accumul.clear()
@@ -475,9 +486,9 @@ class SegmentationModule(pl.LightningModule):
         loss = self.loss_fn(outputs, masks)
 
         #batch_dice = self.dice_score(preds, masks).unsqueeze(dim=0)
-        batch_dice = dice_score(
+        """ batch_dice = dice_score(
             preds, masks, num_classes=4, average="none", input_format='index', include_background=False,
-        )
+        ) """
         batch_iou = iou_per_sample_per_class(preds, masks, 4, ignore_index=0)
 
         preds_one_hot = F.one_hot(preds, num_classes=4).permute(0, 3, 1, 2).float() 
@@ -490,7 +501,7 @@ class SegmentationModule(pl.LightningModule):
             )
         
         self.test_metric_accumul.append({
-            'dice': batch_dice,
+            #'dice': batch_dice,
             'iou': batch_iou,
             'hausdorff': batch_hd95,
         })
@@ -498,11 +509,11 @@ class SegmentationModule(pl.LightningModule):
         return loss
     
     def on_test_epoch_end(self):
-        all_dice = torch.cat([x["dice"] for x in self.test_metric_accumul], dim=0)
+        #all_dice = torch.cat([x["dice"] for x in self.test_metric_accumul], dim=0)
         all_iou = torch.cat([x["iou"] for x in self.test_metric_accumul], dim=0)
         all_hausdorff = torch.cat([x["hausdorff"] for x in self.test_metric_accumul], dim=0)
 
-        self._log_raw_scores(scores=all_dice, score_name="dice", prefix="test")
+        #self._log_raw_scores(scores=all_dice, score_name="dice", prefix="test")
         self._log_raw_scores(scores=all_iou, score_name="iou", prefix="test")
         self._log_raw_scores(scores=all_hausdorff, score_name="hd95", prefix="test")
 
@@ -537,8 +548,7 @@ class SegmentationModule(pl.LightningModule):
                 weight_decay=cfg.weight_decay,
             )
 
-        # ── Warmup linéaire ────────────────────────────────────────────────
-        # LambdaLR multiplie le LR de base par le facteur retourné par la lambda.
+
         list_scheduler = []
         warmup_epochs = cfg.warmup_epochs
         if warmup_epochs > 0:
@@ -549,14 +559,6 @@ class SegmentationModule(pl.LightningModule):
 
             warmup_scheduler = LambdaLR(optimizer, lr_lambda=warmup_lambda)
             list_scheduler.append(warmup_scheduler)
-        else:
-            if cfg.scheduler == 'plateau':
-                list_scheduler.append(
-                        ReduceLROnPlateau(
-                            optimizer,
-                            mode='min'
-                        )
-                )
 
         if cfg.scheduler == 'cosine':
             list_scheduler.append(
@@ -576,20 +578,16 @@ class SegmentationModule(pl.LightningModule):
                 )
             )
 
+        elif cfg.scheduler != 'plateau':
+            pass
         else:
-            list_scheduler.append(
-                CosineAnnealingLR(
-                    optimizer,
-                    T_max=cfg.max_epochs - warmup_epochs,
-                    eta_min=cfg.lr * 1e-2,  # [EXP] floor du LR
-                )
-            )
+            raise NotImplementedError(f"Scheduler '{cfg.scheduler}' not implemented.")
 
         schedulers = SequentialLR(
             optimizer,
             schedulers=list_scheduler,
             milestones=[warmup_epochs] if warmup_epochs > 0 else [],
-        ) if cfg.scheduler != 'plateau' else list_scheduler[0]
+        ) if cfg.scheduler != 'plateau' else ReduceLROnPlateau(optimizer, mode='min')
 
         return {
             "optimizer": optimizer,

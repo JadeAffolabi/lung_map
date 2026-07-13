@@ -50,14 +50,16 @@ def analyze_patch_distribution(loader, num_classes=4):
 
 
 if __name__ == '__main__':
-    datamodule = SegmentationDataModule2(
-        train_urls=get_path_shards('train'),
-        val_urls=get_path_shards('val'),
-        test_urls=get_path_shards('test'),
-        rare_train_urls=get_path_shards('train-rare'),
-        common_train_urls=get_path_shards('train-common'),
-        batch_size=16, 
-        num_workers=7
+    shard_dir = 'shards_bcss'
+    datamodule = SegmentationDataModule(
+        train_urls=get_path_shards('train-full', shard_dir),
+        val_urls=get_path_shards('val', shard_dir),
+        test_urls=get_path_shards('test', shard_dir),
+        n_images=122,
+        batch_size=4, 
+        num_workers=0,
+        patches_per_image_train=10,
+        multichannel=False
     )
 
     train_loader = datamodule.train_dataloader()
