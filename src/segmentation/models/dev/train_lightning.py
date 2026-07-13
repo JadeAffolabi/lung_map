@@ -31,8 +31,8 @@ def build_callbacks(cfg: Config) -> list:
         ModelCheckpoint(
             dirpath=cfg.training.save_dir,
             filename="best-{epoch:03d}-{val_dice:.4f}",
-            monitor="val/val_dice",
-            mode="max",
+            monitor="val/val_loss",
+            mode="min",
             save_top_k=1,       
             save_last=False,
             save_weights_only=True,   
@@ -120,6 +120,7 @@ def build_trainer(cfg: Config, args: argparse.Namespace) -> Trainer:
 
         # ── Validation ────────────────────────────────────────────────────
         check_val_every_n_epoch=1,
+        #overfit_batches=1,
 
         # ── Callbacks et loggers ──────────────────────────────────────────
         callbacks=build_callbacks(cfg),
@@ -158,11 +159,13 @@ def main():
     cfg = Config(
         encoder=None,
         decoder=None,
+        name='unet',
     )
 
+    cfg.training.n_channels        = 3
     cfg.training.num_workers       = 4
     cfg.training.batch_size        = 64
-    cfg.training.max_epochs        = 20
+    cfg.training.max_epochs        = 2
     cfg.training.warmup_epochs     = 0
     cfg.training.optimizer         = 'adamw'
     cfg.training.lr                = 1e-4
@@ -171,16 +174,14 @@ def main():
 
     cfg.training.dropout           = 0.5
 
-    cfg.training.loss_type         = "ce+dice"
-    cfg.training.dice_weight       = 0.5
-    cfg.training.focal_gamma       = 0
+    cfg.training.loss_type         = "focal+dice"
+    cfg.training.dice_weight       = 0.7
+    cfg.training.focal_gamma       = 1
 
     cfg.training.save_dir          = args.save_dir
 
     # ── Login Hugginface ───────────────────────────────────────────────────
     #login(ACCESS_TOKEN)
-
-    # ── Module et DataModule ───────────────────────────────────────────────
 
     """     datamodule = SegmentationDataModule2(
         train_urls=get_path_shards('train'),
@@ -192,7 +193,7 @@ def main():
         num_workers=cfg.training.num_workers
     ) """
 
-    shard_dir = 'shards_bcss'
+    shard_dir = 'shards_bcss10x'
     datamodule = SegmentationDataModule(
         train_urls=get_path_shards('train-full', shard_dir),
         val_urls=get_path_shards('val', shard_dir),
@@ -200,36 +201,55 @@ def main():
         n_images=122,
         batch_size=cfg.training.batch_size, 
         num_workers=cfg.training.num_workers,
-        patches_per_image_train=5,
+        patches_per_image_train=3,
+        multichannel=cfg.training.n_channels > 3
     )
+    #datamodule.train_transform = datamodule.eval_transform
 
-    cfg.training.class_weights = get_class_weight_from_shards(
+    """ cfg.training.class_weights = get_class_weight_from_shards(
         get_path_shards('train-full', shard_dir),
         num_classes=4,
         norm=True,
-        square_root=True,    
+        square_root=False,    
     ).tolist()
-    print(cfg.training.class_weights)
+    print(cfg.training.class_weights) """
 
     module = SegmentationModule(cfg)
 
-    # ── Trainer ───────────────────────────────────────────────────────────
     trainer = build_trainer(cfg, args)
-
-    # ── Entraînement ──────────────────────────────────────────────────────
     trainer.fit(
         module, 
         datamodule,
     )
 
-    # ── Évaluation finale sur le test set ─────────────────────────────────
     torch.serialization.add_safe_globals([
         Config, EncoderConfig, 
         DecoderConfig, TrainingConfig,
     ])
     trainer.test(module, datamodule=datamodule, ckpt_path="best")
-    #trainer.test(module, datamodule=datamodule)
- 
+
+    """
+    lit_module = module.cuda() 
+    loader = datamodule.train_dataloader()
+    imgs, masks = next(iter(loader))   # 1 seul batch, figé en mémoire
+    imgs, masks = imgs.cuda(), masks.cuda()
+
+    optimizer = torch.optim.AdamW(lit_module.model.parameters(), lr=1e-3)
+
+    lit_module.model.train()
+    for step in range(500):
+        optimizer.zero_grad()
+        outputs = lit_module.model(imgs)
+        loss = lit_module.loss_fn(outputs, masks)
+        loss.backward()
+        optimizer.step()
+
+        if step % 20 == 0:
+            with torch.no_grad():
+                preds = outputs.argmax(dim=1)
+                from lightning_module import iou_per_sample_per_class
+                iou = iou_per_sample_per_class(preds, masks, 4, ignore_index=0)
+                print(f"step {step} | loss {loss.item():.4f} | mean IoU {iou.nanmean().item():.4f}") """
 
 if __name__ == "__main__":
     main()

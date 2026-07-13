@@ -3,7 +3,7 @@
 # GPUs architecture and number
 # ----------------------------
 # Partition (submission class)
-#SBATCH --partition gpu
+#SBATCH --partition gpu_all
 
 # GPUs per compute node
 #   a100:8 (maximum) for gpu
@@ -22,11 +22,11 @@
 #   gpu: until 16 cores / device
 #   hpda: until 16 cores / device
 #   gpu_h200: until 24 cores / device
-#SBATCH --cpus-per-task 12
+#SBATCH --cpus-per-task 16
 
 # ------------------------
 # Job time (hh:mm:ss)
-#SBATCH --time 02:00:00
+#SBATCH --time 05:00:00
 # ------------------------
 
 #SBATCH --output=/home/2017018/jaffol01/lung_map/slurm_out/slurm-%j.out

@@ -3,26 +3,28 @@ name = "lung-map"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.11,<3.12"
 dependencies = [
-    "albumentations>=2.0.8",
+    "albumentations>=1.4,<2.0",
     "bokeh>=3.9.1",
     "hf-transfer>=0.1.9",
     "ipykernel>=7.2.0",
     "lightning>=2.6.1",
     "matplotlib>=3.10.9",
+    "monai<=1.6.0",
     "opencv-python>=4.13.0.92",
     "openpyxl>=3.1.5",
     "pandas>=3.0.3",
     "peft>=0.19.1",
     "python-dotenv>=1.2.2",
+    "pytorch-lightning>=2.6.5",
     "scikit-image>=0.26.0",
     "scikit-learn>=1.8.0",
     "scipy>=1.17.1",
     "seaborn>=0.13.2",
     "segmentation-models-pytorch>=0.5.0",
     "timm>=1.0.27",
-    "torch>=2.6.0",
+    "torchmetrics>=1.0.3",
     "wandb>=0.27.0",
     "webdataset>=1.0.2",
 ]
@@ -39,3 +41,10 @@ dev = [
     "pytest>=9.0.3",
     "ruff>=0.15.13",
 ]
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu121" }
+
+[[tool.uv.index]]
+name = "pytorch-cu121"
+url = "https://download.pytorch.org/whl/cu121"
