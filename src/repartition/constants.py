@@ -3,16 +3,28 @@ from pathlib import Path
 
 COLOR2LABEL = {
     (255,   255,   255):   0,  # white -> not region of interest
-    (200, 0,   0):   1,  # red (#c80000) → Tumor
-    (150, 200, 150): 2,  # green (#96c896) → Stroma
-    (50, 50, 50): 3,  # black (#323232) → Necrosis
+    (200, 0,   0):   1,  # red → Tumor
+    (0, 0, 200): 3,  # black → Necrosis
+    (0, 200, 0): 2,  # green → Stroma
 }
 
 CLASSES = {
     'tumor': 1,
+    'necrosis': 3,
     'stroma': 2,
-    'necrosis': 3
 }
+
+
+MULTI_SLIDES_PATIENTS = (
+    '24P41641',
+    'DS_A02R',
+    '25P31438',
+    '26P2581',
+    '25P35403',
+    '25P32590',
+    '24P43380',
+    '25P22227'
+)
 
 CLASS_NAMES = ["necrosis", "stroma", "tumor", "tumor_bed"]
 

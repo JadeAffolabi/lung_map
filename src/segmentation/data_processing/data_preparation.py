@@ -82,12 +82,13 @@ class BcssPaths(DataPaths):
         return "UNKNOWN"
 
 class LchurPaths(DataPaths):
-    def __init__(self):
-        self.img_paths, self.mask_paths = self._get_data_paths_lchur()
+    def __init__(self, data_dir=None):
+        self.img_paths, self.mask_paths = self._get_data_paths_lchur(data_dir)
 
-    def _get_data_paths_lchur(self):
-        img_paths = glob.glob(os.path.join(RAW_DATA_DIR, DIR_LCHUR, "imgs", "*.png"))
-        mask_paths = glob.glob(os.path.join(RAW_DATA_DIR, DIR_LCHUR, "masks", "*.tif"))
+    def _get_data_paths_lchur(self, data_dir=None):
+        dir_lchur = data_dir if data_dir is not None else DIR_LCHUR
+        img_paths = glob.glob(os.path.join(RAW_DATA_DIR, dir_lchur, "imgs", "*.png"))
+        mask_paths = glob.glob(os.path.join(RAW_DATA_DIR, dir_lchur, "masks", "*.tif"))
         img_paths.sort()
         mask_paths.sort()
 
@@ -105,12 +106,23 @@ class LchurPaths(DataPaths):
             return patient_id
         return "UNKNOWN"
 
-def extract_from_zip(zip_dir):
-    archives_path = glob.glob(os.path.join(zip_dir, "*.zip")) 
+def extract_from_zip(zip_dir, zip_name=None):
+    if zip_name is None:
+        archives_path = glob.glob(os.path.join(zip_dir, "*.zip")) 
+    else:
+        archives_path = glob.glob(os.path.join(zip_dir, zip_name))
     os.makedirs(RAW_DATA_DIR, exist_ok=True)
     for arch_pth in archives_path:
         with ZipFile(arch_pth, 'r') as zObject:
             zObject.extractall(path=RAW_DATA_DIR)
+
+
+def too_much_white(patch, pixel_threshold=240, max_white_ratio=0.05):
+
+    white_mask = np.all(patch >= pixel_threshold, axis=-1)
+    white_ratio = np.mean(white_mask)
+    
+    return white_ratio > max_white_ratio
 
 def patient_level_split(data_paths: DataPaths, train_ratio=0.8,
                         val_ratio=None):
@@ -337,9 +349,10 @@ def is_partially_annot(mask):
 def extract_patches(
     image: np.ndarray,
     mask: np.ndarray,
-    patch_size: Union[int, None]=224,
+    patch_size: int =224,
     other_label: int = 0,
     min_valid_ratio: float = 0.1,
+    max_white_ratio=0.05
 ) -> list[dict]:
 
     H, W = mask.shape
@@ -350,7 +363,8 @@ def extract_patches(
                 img_patch  = image[y : y+patch_size, x : x+patch_size]
                 mask_patch = mask [y : y+patch_size, x : x+patch_size]
 
-                if np.mean(mask_patch != other_label) < min_valid_ratio:
+                if (np.mean(mask_patch != other_label) < min_valid_ratio) \
+                    or (too_much_white(img_patch, max_white_ratio=max_white_ratio)):
                     continue
 
                 patches.append({
@@ -401,23 +415,35 @@ def data_adaptation(img, mask, img_path, patch_size: Union[int, None]=224):
             interpolation=cv2.INTER_NEAREST
         )
 
-        """ result = extract_patches(
-            img_10x, mask_10x, patch_size=patch_size,
-            other_label=CLASSES_TO_LABELS['other'],
-            min_valid_ratio=0.20
-        ) """
-        result.append({
-            "img": img_10x,
-            "mask": mask_10x,
-            "pos": None,
-        })
+        if patch_size is None:
+            result.append({
+                "img": img_10x,
+                "mask": mask_10x,
+                "pos": None,
+            })
+        else:
+            result = extract_patches(
+                img_10x, mask_10x, patch_size=patch_size,
+                other_label=CLASSES_TO_LABELS['other'],
+                min_valid_ratio=0.20,
+                max_white_ratio=0.80,
+            )
+        
     
     if is_lchur(img_path):
-        result.append({
-            "img": img,
-            "mask": mask,
-            "pos": None,
-        })
+        if patch_size is None:
+            result.append({
+                "img": img,
+                "mask": mask,
+                "pos": None,
+            })
+        else:
+            result = extract_patches(
+                img, mask, patch_size=patch_size,
+                other_label=CLASSES_TO_LABELS['other'],
+                min_valid_ratio=0.20, # Here this argument is not relevant, since the other label is not present
+                max_white_ratio=0.05
+            )
 
     return result
 
@@ -475,24 +501,24 @@ if __name__ == '__main__':
 
     path_to_zip = args.zip_path
     print(f"Extracting data from {path_to_zip}")
-    extract_from_zip(path_to_zip)
+    extract_from_zip(path_to_zip, zip_name='LCHUR_TEST.zip')
 
     #luadpaths = LuadPaths()
-    bcsspaths = BcssPaths()
-    #lchurpaths = LchurPaths()
+    #bcsspaths = BcssPaths()
+    lchurpaths = LchurPaths(data_dir='LCHUR_TEST')
 
     print("Merging and splitting datasets")
     #train_dict, test_dict, val_dict = merge_split([luadpaths, bcsspaths], train_ratio=0.9, val_ratio=0.1)
-    train_ratio=0.9
-    val_ratio=0.1
-    train_dict, test_dict, val_dict = patient_level_split(bcsspaths, train_ratio, val_ratio)
+    train_ratio=1
+    val_ratio=None
+    train_dict, test_dict, val_dict = patient_level_split(lchurpaths, train_ratio, val_ratio)
 
     assert img_mask_correct_order(train_dict) \
         & img_mask_correct_order(test_dict) \
         & img_mask_correct_order(val_dict) \
         ,"Images and masks are not in correct order"
 
-    shard_dir = '/shards_bcss10x'
+    shard_dir = '/shards_lchur_test'
     patch_size = None
 
     print("Creating shards")

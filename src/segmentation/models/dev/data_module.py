@@ -173,13 +173,13 @@ def get_wsi_transforms(mode: str):
         A.HorizontalFlip(p=0.5),
         A.VerticalFlip(p=0.5),
         A.RandomRotate90(p=0.5),                 # rotations à 0/90/180/270°
-        A.ElasticTransform(                      # déformation du tissu
-            alpha=120, sigma=10,
-            p=0.2,
-        ),
+        # A.ElasticTransform(                      # déformation du tissu
+        #     alpha=120, sigma=10,
+        #     p=0.2,
+        # ),
 
         # ── Couleur / coloration ───────────────────────────────────────────────
-        HEDStainJitter(strength=0.03, p=0.2),   # variation inter-scanner (priorité haute)
+        #HEDStainJitter(strength=0.03, p=0.2),   # variation inter-scanner (priorité haute)
         # ── Artefacts scanner ──────────────────────────────────────────────────
         A.GaussianBlur(blur_limit=(3, 7), p=0.2),   # variation de mise au point
         *shared,
@@ -295,20 +295,20 @@ class SegmentationDataModule(pl.LightningDataModule):
             )
             .decode(custom_decoder)
             .to_tuple("__key__", "image.png", "mask.png")
-            # .map(lambda x: self._process_sample(x, is_train=True))
+            .map(lambda x: self._process_sample(x, is_train=True))
+            .shuffle(100)
+            .with_epoch(n_train_samples)
+            # .compose(lambda src: multiscale_patch_generator(
+            #     src, 
+            #     num_patches=self.patches_per_image_train, 
+            #     mode='random',
+            #     rare_class_ids=[2],
+            #     rare_class_prob=0.6,
+            #     images_size=self.images_size,
+            # ))
+            # .map(lambda x: self._process_sample_2(x, is_train=True))
             # .shuffle(100)
             # .with_epoch(n_train_samples)
-            .compose(lambda src: multiscale_patch_generator(
-                src, 
-                num_patches=self.patches_per_image_train, 
-                mode='random',
-                rare_class_ids=[2],
-                rare_class_prob=0.6,
-                images_size=self.images_size,
-            ))
-            .map(lambda x: self._process_sample_2(x, is_train=True))
-            .shuffle(500)
-            .with_epoch(n_train_samples)
         )
 
         return DataLoader(
@@ -328,14 +328,15 @@ class SegmentationDataModule(pl.LightningDataModule):
             )
             .decode(custom_decoder)
             .to_tuple("__key__", "image.png", "mask.png")
-            #.map(lambda x: self._process_sample(x, is_train=False))
-            .compose(lambda src: multiscale_patch_generator(
-                src, 
-                num_patches=1, 
-                mode='grid',
-                max_grid_patchs=5,
-            ))
-            .map(lambda x: self._process_sample_2(x, is_train=False))
+            .map(lambda x: self._process_sample(x, is_train=False))
+            # .compose(lambda src: multiscale_patch_generator(
+            #     src, 
+            #     num_patches=1, 
+            #     mode='grid',
+            #     max_grid_patchs=1,
+            #     images_size=self.images_size,
+            # ))
+            # .map(lambda x: self._process_sample_2(x, is_train=False))
         )
 
         return DataLoader(
@@ -355,14 +356,15 @@ class SegmentationDataModule(pl.LightningDataModule):
             )
             .decode(custom_decoder)
             .to_tuple("__key__", "image.png", "mask.png")
-            #.map(lambda x: self._process_sample(x, is_train=False))
-            .compose(lambda src: multiscale_patch_generator(
-                src, 
-                num_patches=1, 
-                mode='grid',
-                max_grid_patchs=5,
-            ))
-            .map(lambda x: self._process_sample_2(x, is_train=False))
+            .map(lambda x: self._process_sample(x, is_train=False))
+            # .compose(lambda src: multiscale_patch_generator(
+            #     src, 
+            #     num_patches=1, 
+            #     mode='grid',
+            #     max_grid_patchs=1,
+            #     images_size=self.images_size,
+            # ))
+            # .map(lambda x: self._process_sample_2(x, is_train=False))
         )
 
         return DataLoader(
@@ -488,13 +490,21 @@ class SegmentationDataModule2(pl.LightningDataModule):
             dataset, 
             batch_size=self.batch_size, 
             num_workers=self.num_workers,
-            pin_memory=True
         )
 
-def get_path_shards(split: str, shard_dir='shards', path=None):
+def get_path_shards(splits: list, shard_dirs=['shards'], path=None):
+    path_list = []
     if path is None:
-        path_to_shards = str(PATH_SEG_DATA / shard_dir)
-        return glob.glob(path_to_shards + f"/{split}-*.tar")
+        for dir, split in zip(shard_dirs, splits):
+            path_to_shards = str(PATH_SEG_DATA / dir)
+            if isinstance(split, list):
+                for s in split:
+                    path_list.extend(glob.glob(path_to_shards + f"/{s}-*.tar"))
+            elif split == 'all':
+                path_list.extend(glob.glob(path_to_shards + f"/*.tar"))
+            else:
+                path_list.extend(glob.glob(path_to_shards + f"/{split}-*.tar"))
+        return path_list
     else:
         return glob.glob(path)
 

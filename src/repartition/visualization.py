@@ -6,9 +6,11 @@ from matplotlib.backends.backend_pdf import PdfPages
 import matplotlib.patches as mpatches
 from matplotlib.lines import Line2D
 import numpy as np
+import cv2
 
 from src.repartition.constants import CLASS_NAMES
-from src.repartition.geometry_funcs import find_center_edt_barycentre
+from src.repartition.geometry_funcs import find_center_barycentre, find_center_skeleton
+from src.repartition.data_analysis import compute_tumor_spread
 
 
 def normalize(mask):
@@ -16,12 +18,30 @@ def normalize(mask):
     mn, mx = arr.min(), arr.max()
     return (arr - mn) / (mx - mn + 1e-9)
 
+# def make_composite(masks):
+#     stack_img = np.stack([normalize(m) for k, m in masks.items() if k != 'tumor_bed'], axis=-1)
+#     bg_mask = ~(stack_img.any(axis=-1)) # ~any() est plus rapide que (==0).all()
+#     stack_img[bg_mask] = 1.0
+#     return stack_img
+
 def make_composite(masks):
+    # 1. Empiler les masques exactement comme dans ton code original (H, W, 3)
     stack_img = np.stack([normalize(m) for k, m in masks.items() if k != 'tumor_bed'], axis=-1)
-    mask = (stack_img == 0).all(axis=-1)
-    for i in range(3):
-        stack_img[:,:,i][mask] = 1
-    return stack_img
+    
+    # 2. Matrice de tes 3 couleurs douces (Rouge, Vert, Bleu)
+    soft_colors = np.array([
+        [0.90, 0.10, 0.10],
+        [0.10, 0.10, 0.90],
+        [0.10, 0.70, 0.10],
+    ])
+    
+    # 3. Le produit matriciel magique : applique les couleurs aux bons canaux
+    img_rgb = stack_img @ soft_colors
+    
+    # 4. Mettre le fond en blanc (comme ton code original)
+    img_rgb[~(stack_img.any(axis=-1))] = 1.0 
+    
+    return np.clip(img_rgb, 0, 1) # Assure que les valeurs restent entre 0 et 1
 
 def make_image_figure(masks, slide_name=None):
     COLORMAPS   = ["Blues", "Greens", "Reds", "Purples"]
@@ -49,9 +69,15 @@ def make_image_figure(masks, slide_name=None):
 
 def make_figure_furthest_tissue(masks, bed_center, tissue_objs, title, tissue_name):
     img_rgb = make_composite(masks)
-    coords = np.argwhere(masks['tumor_bed'])
-    y_min, x_min = coords.min(axis=0)
-    y_max, x_max = coords.max(axis=0)
+    bed_mask = masks['tumor_bed']
+
+    rows = np.any(bed_mask, axis=1)
+    cols = np.any(bed_mask, axis=0) 
+    if rows.any(): # Sécurité au cas où le masque est vide
+        y_min, y_max = np.argmax(rows), len(rows) - 1 - np.argmax(rows[::-1])
+        x_min, x_max = np.argmax(cols), len(cols) - 1 - np.argmax(cols[::-1])
+    else:
+        y_min, y_max, x_min, x_max = 0, bed_mask.shape[0], 0, bed_mask.shape[1]
     h_pad = (y_max - y_min) * 0.30
     w_pad = (x_max - x_min) * 0.30
 
@@ -62,8 +88,8 @@ def make_figure_furthest_tissue(masks, bed_center, tissue_objs, title, tissue_na
     ax.set_ylim(y_max + h_pad, y_min - h_pad)
     ax.set_title(title, fontsize=14, fontweight='bold', y=0.9)
 
-    ax.plot(bed_center[1], bed_center[0], marker="o", color="white",
-             ms=5, mew=0.2, mec='black', zorder=5, label='tumor bed center')
+    ax.plot(bed_center[1], bed_center[0], marker="*", color="black",
+             ms=10, mew=0.2, mec='black', zorder=5, label='tumor bed center')
 
     idx_max = tissue_objs['distance-center'].idxmax()
     y, x = tissue_objs['periph-coord'].loc[idx_max]
@@ -83,8 +109,8 @@ def make_figure_furthest_tissue(masks, bed_center, tissue_objs, title, tissue_na
         mpatches.Patch(color='red', label='tumor'),
         mpatches.Patch(color='green', label='stroma'),
         mpatches.Patch(color='blue', label='necrosis'),
-        Line2D([0], [0], marker='o', color='w', label='centre du lit',
-            markerfacecolor='white', markeredgecolor='black', markersize=10),
+        Line2D([0], [0], marker='*', color='w', label='centre du lit',
+            markerfacecolor='black', markeredgecolor='black', markersize=10),
         Line2D([0], [0], marker='v', color='w', label='tumeur la plus éloigné',
             markerfacecolor='yellow',  markeredgecolor='black', markersize=10),
     ]
@@ -99,6 +125,44 @@ def make_figure_furthest_tissue(masks, bed_center, tissue_objs, title, tissue_na
         ncol=2
     )
 
+    ax.axis("off")
+    return fig
+
+def make_figure_convex_hull(masks, title):
+    img_rgb = make_composite(masks)
+    img_rgb = (img_rgb * 255).astype(np.uint8)
+
+    coords = np.argwhere(masks['tumor_bed'])
+    y_min, x_min = coords.min(axis=0)
+    y_max, x_max = coords.max(axis=0)
+    h_pad = (y_max - y_min) * 0.30
+    w_pad = (x_max - x_min) * 0.30
+
+    fig, ax = plt.subplots(figsize=(8, 8))
+
+    # color = (0, 0, 0)
+    # cv2.drawContours(img_rgb, [hull], -1, color, thickness=3)
+
+    ax.imshow(img_rgb)
+    ax.set_xlim(x_min - w_pad, x_max + w_pad)
+    ax.set_ylim(y_max + h_pad, y_min - h_pad)
+    ax.set_title(title, fontsize=12, fontweight='bold', y=0.9)
+
+    legend_elements = [
+        mpatches.Patch(color='red', label='tumor'),
+        mpatches.Patch(color='green', label='stroma'),
+        mpatches.Patch(color='blue', label='necrosis'),
+    ]
+    ax.legend(
+        handles=legend_elements,
+        loc='lower right',      # Position (ex: 'best', 'lower right', 'center')
+        fontsize='medium',     # Taille de la police
+        frameon=True,          # Afficher ou non le cadre
+        shadow=True,           # Ajouter une ombre
+        facecolor='white',     # Couleur de fond du bloc
+        edgecolor='black',     # Couleur de la bordure
+        ncol=2
+    )
 
     ax.axis("off")
     return fig
@@ -129,23 +193,35 @@ def draw_bar_plot(labels, sizes, colors):
     return fig
 
 def export_mask_pdf(slide_annotations, output="masques.pdf", saveimg=False):
+
+    plt.ioff() 
+    
+    if saveimg:
+        savedir = f"./{output.split('.')[0]}"
+        os.makedirs(savedir, exist_ok=True)
+
     with PdfPages(output) as pdf:
         for sld_name in slide_annotations:
             masks = slide_annotations[sld_name]
             fig = make_image_figure(masks, sld_name)
             pdf.savefig(fig, bbox_inches="tight", dpi=150)
             if saveimg:
-                savedir = f"./{output.split('.')[0]}"
-                if not os.path.exists(savedir):
-                    os.mkdir(savedir)
                 fig.savefig(f"{savedir}/img_{sld_name}.png")
+            fig.clf()
             plt.close(fig)
 
         d = pdf.infodict()
         d["Title"]   = "Visualisation masques"
 
-def export_furthest_tissue_pdf(slide_annotations, tissues_geometrics,
+def export_furthest_tissue_pdf(slide_annotations, func_find_center, tissues_geometrics,
                                 tissue_type='tumor', output="furthest_tumors.pdf", saveimg=False):
+
+    plt.ioff()
+    
+    if saveimg:
+        savedir = f"./{output.split('.')[0]}"
+        os.makedirs(savedir, exist_ok=True)
+
     with PdfPages(output) as pdf:
         for sld_name in slide_annotations:
             tissues = tissues_geometrics[
@@ -158,10 +234,44 @@ def export_furthest_tissue_pdf(slide_annotations, tissues_geometrics,
             masks = slide_annotations[sld_name]
             tumor_bed = {
                 'mask': masks['tumor_bed'],
-                'center': find_center_edt_barycentre(masks['tumor_bed'])[0]['center']
+                'center': func_find_center(masks['tumor_bed'])[0]['center']
             }
-            
-            fig = make_figure_furthest_tissue(masks, tumor_bed['center'], tissues, f"Slide {sld_name}", tissue_type)
+
+            #fig = make_figure_furthest_tissue(masks, tumor_bed['center'], tissues, f"Slide {sld_name}", tissue_type)
+            fig = make_figure_furthest_tissue(masks, tumor_bed['center'], tissues, "", tissue_type)
+            pdf.savefig(
+                fig,
+                bbox_inches='tight',
+                pad_inches=0, 
+                dpi=300,            # Increases image quality
+                transparent=False
+            )
+            if saveimg:
+                fig.savefig(
+                    f"{savedir}/img_{sld_name}.png",
+                    transparent=True
+                )
+            fig.clf()
+            plt.close(fig)
+
+        d = pdf.infodict()
+        d["Title"]   = "Visualization furthest tumor per slide"
+
+def export_tumor_spread_pdf(
+        slide_annotations,
+        spread_infos,
+        output="tumors_spread.pdf", saveimg=False
+    ):
+    with PdfPages(output) as pdf:
+        for sld_name in slide_annotations:
+            masks = slide_annotations[sld_name]
+    
+            if not np.any(masks['tumor']):
+                continue
+
+            sp_score = spread_infos[sld_name]
+
+            fig = make_figure_convex_hull(masks, f"Slide {sld_name}\nspread score : {sp_score:.2f}")
             pdf.savefig(
                 fig,
                 bbox_inches='tight',
@@ -180,7 +290,7 @@ def export_furthest_tissue_pdf(slide_annotations, tissues_geometrics,
             plt.close(fig)
 
         d = pdf.infodict()
-        d["Title"]   = "Visualization furthest tumor per slide"
+        d["Title"]   = "Visualization of convex hull and spread score"
 
 def export_tissues_proportion(all_tissues_areas, output='tissues_proportion.pdf',
                                draw_type='bar', saveimg=False):
@@ -234,7 +344,8 @@ def plot_distribution(distrib, show='hist-proportion',
                        ref='center', figsize=(12, 8), 
                        suptitle="Titre Général",
                        xlabel="Valeurs de x", 
-                       ylabel="Valeurs de y"):
+                       ylabel="Valeurs de y",
+                       save_imgs=None):
     
     n = len(distrib)
     if n == 0: return
@@ -279,6 +390,7 @@ def plot_distribution(distrib, show='hist-proportion',
         
         ax.grid(True, linestyle='-', alpha=0.3, color='#a0a0a0')
         ax.set_axisbelow(True)
+        ax.set_xticks([0, 0.5, 1])
 
         if show == 'hist':
             counts = dist['hist'][ref][0]
@@ -296,7 +408,7 @@ def plot_distribution(distrib, show='hist-proportion',
                 #ax.set_ylim(0, global_y_max * 1.1)
 
         elif show == 'kde':
-            x_eval = np.linspace(0, 2, num=100) if ref=='center' else np.linspace(0, 5, num=50)
+            x_eval = np.linspace(0, 1.5, num=50) if ref=='center' else np.linspace(0, 5, num=50)
             ax.plot(x_eval, dist['kde'][ref](x_eval))
         
         elif show == 'hist-proportion':
@@ -318,8 +430,9 @@ def plot_distribution(distrib, show='hist-proportion',
                 spine.set_visible(True)
                 spine.set_color('#dddddd')
                 spine.set_linestyle('--')
-            ax.set_xticks([])
             ax.set_yticks([])
+        
+            
 
     for j in range(len(distrib), len(axes)):
         axes[j].axis('off')

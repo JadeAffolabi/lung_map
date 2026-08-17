@@ -4,7 +4,8 @@ import numpy as np
 from scipy.ndimage import binary_fill_holes
 import tifffile
 
-from src.repartition.constants import CLASSES, COLOR2LABEL
+from src.repartition.constants import CLASSES, COLOR2LABEL, MULTI_SLIDES_PATIENTS
+from src.repartition.data_analysis import id_patient
 
 def is_valid_mask(mask, num_class=10):
     return np.all(mask < num_class)
@@ -96,6 +97,7 @@ def tif_to_filled_mask(img_tif):
 
 def get_annotation(path2annot, tif_to_mask):
     slides_annot = dict()
+    puzzle_slides = {p:{} for p in MULTI_SLIDES_PATIENTS}
     for annot_pth in path2annot:
         img = tifffile.imread(annot_pth)
         masks = tif_to_mask(img)
@@ -105,4 +107,10 @@ def get_annotation(path2annot, tif_to_mask):
             slide_name: masks
         })
 
-    return slides_annot
+        id = id_patient(slide_name)
+        if id in MULTI_SLIDES_PATIENTS:
+            puzzle_slides[id].update({
+                slide_name: img
+            })
+
+    return slides_annot, puzzle_slides

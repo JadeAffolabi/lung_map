@@ -23,6 +23,7 @@ CLASS_CONVERSION_LUAD = {
     'necrosis': [1],
     'stroma': [2, 3],
 }
+
 CLASS_CONVERSION_BCSS = {
     'tumor': [1, 19, 20],
     'necrosis': [4],
