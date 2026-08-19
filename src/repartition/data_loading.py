@@ -4,6 +4,7 @@ import numpy as np
 from scipy.ndimage import binary_fill_holes
 import tifffile
 
+
 from src.repartition.constants import CLASSES, COLOR2LABEL, MULTI_SLIDES_PATIENTS
 from src.repartition.data_analysis import id_patient
 
@@ -53,25 +54,35 @@ def is_jagged(mask, crack_width=15, threshold=0.02):
     crack_ratio = crack_pixels.sum() / max(1, mask.sum())
     return crack_ratio > threshold, crack_ratio
 
-def is_mask_to_substract(mask1, mask2, kernel_size=3):
-    intersection = mask1 & mask2
-    kernel = np.ones((kernel_size, kernel_size), np.uint8) # A 3x3 kernel looks at the immediate 1-pixel border
+def is_nested_mask(mask1, mask2, tol=1e-1, kernel_size=3):
+    intersection = mask1 & mask2 
+    kernel = np.ones((kernel_size, kernel_size), np.uint8) 
     dilated_intersect = cv2.dilate(intersection, kernel, iterations=1)
 
-    surround_zone = cv2.subtract(dilated_intersect, intersection)
+    surround_zone = dilated_intersect & ~intersection
 
     surrounding_pixels = mask1[surround_zone > 0]
-    is_surrounded_by_background = np.all(surrounding_pixels == 0)
-
-    return is_surrounded_by_background
+    pxl_val, counts = np.unique(surrounding_pixels, return_counts=True)
+    print(pxl_val, counts/counts[0])
+    if len(pxl_val) == 2:
+        return counts[1]/counts[0] < tol
+    elif pxl_val in [255, 1]:
+        return False
+    else:
+        return True
 
 def tif_to_real_mask(img_tif):
     masks = dict()
     for cls in CLASSES:
         msk = img_tif[CLASSES[cls],:,:]
+        msk = (msk != 0).astype(np.uint8) # security
         for other_cls in CLASSES:
+            print(f"{cls} vs {other_cls}")
+            if other_cls == cls:
+                continue
             other_msk = img_tif[CLASSES[other_cls],:,:]
-            if (other_cls != cls) and (not is_mask_to_substract(msk, other_msk)):
+            other_msk = (other_msk != 0).astype(np.uint8) # security
+            if np.any(msk & other_msk) and (not is_nested_mask(msk, other_msk)):
                 msk = msk & ~other_msk
         masks.update(
             {cls: msk}
@@ -99,10 +110,11 @@ def get_annotation(path2annot, tif_to_mask):
     slides_annot = dict()
     puzzle_slides = {p:{} for p in MULTI_SLIDES_PATIENTS}
     for annot_pth in path2annot:
+        slide_name = annot_pth.split("/")[-1].split("-")[0]
+        print(slide_name)
         img = tifffile.imread(annot_pth)
         masks = tif_to_mask(img)
 
-        slide_name = annot_pth.split("/")[-1].split("-")[0]
         slides_annot.update({
             slide_name: masks
         })

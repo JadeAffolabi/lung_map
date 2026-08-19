@@ -501,25 +501,25 @@ if __name__ == '__main__':
 
     path_to_zip = args.zip_path
     print(f"Extracting data from {path_to_zip}")
-    extract_from_zip(path_to_zip, zip_name='LCHUR_TEST.zip')
+    extract_from_zip(path_to_zip, zip_name="LUAD-HistoSeg.zip")
 
-    #luadpaths = LuadPaths()
+    luadpaths = LuadPaths()
     #bcsspaths = BcssPaths()
-    lchurpaths = LchurPaths(data_dir='LCHUR_TEST')
+    #lchurpaths = LchurPaths(data_dir='LCHUR_TEST')
 
     print("Merging and splitting datasets")
     #train_dict, test_dict, val_dict = merge_split([luadpaths, bcsspaths], train_ratio=0.9, val_ratio=0.1)
-    train_ratio=1
-    val_ratio=None
-    train_dict, test_dict, val_dict = patient_level_split(lchurpaths, train_ratio, val_ratio)
+    train_ratio=0.8
+    val_ratio=0.1
+    train_dict, test_dict, val_dict = patient_level_split(luadpaths, train_ratio, val_ratio)
 
     assert img_mask_correct_order(train_dict) \
         & img_mask_correct_order(test_dict) \
         & img_mask_correct_order(val_dict) \
         ,"Images and masks are not in correct order"
 
-    shard_dir = '/shards_lchur_test'
-    patch_size = None
+    shard_dir = '/shards_luad_224'
+    patch_size = 224
 
     print("Creating shards")
 
