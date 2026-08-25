@@ -1,4 +1,3 @@
-import math
 import warnings
 
 import cv2
@@ -7,12 +6,11 @@ import pandas as pd
 from sklearn.preprocessing import StandardScaler
 from scipy.stats import wasserstein_distance
 from scipy.spatial.distance import pdist
-from sklearn.cluster import AgglomerativeClustering, DBSCAN
-from sklearn.manifold import MDS, TSNE
 
 from src.repartition.constants import CLASSES
 from src.repartition.geometry_funcs import find_center_barycentre, find_center_skeleton
 from src.repartition.TissueCollection import *
+from skimage.morphology import skeletonize
 
 def id_patient(slide_name):
     if 'BC' in slide_name:
@@ -126,25 +124,20 @@ def compute_statistics(geo_data, tissue='tumor', by='id-slide'):
     )
     return result
 
-def get_areas(geo_data):
-    result = geo_data.groupby([
-        'id-patient', 
-        'id-slide', 
-        'type'
-        ])[['area', 'area-percentage']].sum()
-    result.reset_index(inplace=True)
-    return result
-
 def get_furthest_tumors(geo_data, by='id-slide'):
     tumor_geo = geo_data[geo_data['type']=='tumor']
     result = tumor_geo.loc[tumor_geo.groupby(by)['distance-center'].idxmax()]
-    result.drop(columns=['periph-coord'], inplace=True)
+    result.drop(columns=['periph-coord', 'type', 'area'], inplace=True)
+    result.reset_index(inplace=True)
+    result.drop(columns=['index'], inplace=True)
     return result
+
 
 def get_closest_tumors(geo_data, by='id-slide'):
     tumor_geo = geo_data[geo_data['type']=='tumor']
     result = tumor_geo.loc[tumor_geo.groupby(by)['min-dist-center'].idxmin()]
-    result.drop(columns=['periph-coord'], inplace=True)
+    result.drop(columns=['periph-coord', 'type', 'area'], inplace=True)
+    result.reset_index(inplace=True)
     return result
 
 def ratio_border_tumor(masks):
@@ -178,12 +171,6 @@ def get_type_proportion_hist(all_tissues_dist, tissue_type='tumor'):
 
     proportion_per_bin = np.nan_to_num(proportion_per_bin)
     return proportion_per_bin, bins
-
-def f_x(x):
-    return x**(2)
-
-def g_x(x):
-    return x**(1/2)
 
 def get_distrib_model(
         model,
@@ -333,18 +320,29 @@ def compute_tumor_spread(tumor_mask, bed_mask):
     bed_contour = bed_contour[0].squeeze()
 
     tum_points = cv2.findNonZero(tumor_mask)
+    tum_points = np.expand_dims(tum_points, 1)
     tum_hull = cv2.convexHull(tum_points).squeeze()
 
-    # bed_points = cv2.findNonZero(bed_mask)
-    # bed_hull = cv2.convexHull(bed_points).squeeze()
+    l_tum = get_diameter(tum_hull)
+    l_bed = get_diameter(bed_contour)
+    
 
-    sp_tum = get_diameter(tum_hull)
-    sp_bed = get_diameter(bed_contour)
+    num_labels, _ = cv2.connectedComponents(tumor_mask, connectivity=8)
+    num_components = num_labels - 1
 
-    tumor_area = cv2.contourArea(tum_hull)
+    if num_components > 1 : 
+        hull_mask = np.zeros_like(tumor_mask)
+        cv2.drawContours(hull_mask, [tum_hull], -1, 255, thickness=-1)
+        empty_mask = (hull_mask & ~tumor_mask) & bed_mask
+        empty_area = np.count_nonzero(empty_mask)
+
+    else:
+        empty_area = 0
+
+    tumor_area = np.count_nonzero(tumor_mask)
     bed_area = np.count_nonzero(bed_mask)
 
-    m = min(1, sp_tum/sp_bed) + min(1, tumor_area / bed_area)
+    m = min(1, l_tum/l_bed) + min(1, tumor_area / bed_area)**2 + empty_area/bed_area
 
     return m
 

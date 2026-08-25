@@ -3,13 +3,9 @@ import cv2
 import numpy as np
 from scipy.ndimage import find_objects
 import numpy as np
-import pandas as pd
 from scipy.ndimage import distance_transform_edt
-from scipy.spatial import distance
 from scipy import stats
 import textwrap
-import matplotlib.pyplot as plt
-import math
 
 
 DOWNSAMPLE_FACTOR = 128
@@ -58,7 +54,6 @@ class TissueCollection:
         if self.is_tumoral:
             bed_center_arr = np.array(bed_center)
             for t in self._tissues:
-                #dist_centers = np.array([distance.euclidean(bed_center, pxl_coord) for pxl_coord in t['peripherical-coord']])
                 dist_centers = np.linalg.norm(t['peripherical-coord'] - bed_center_arr, axis=1)
                 furthest_tum_pxl_idx = np.argmax(dist_centers)
 
@@ -66,8 +61,6 @@ class TissueCollection:
                 t['peripherical-coord'] = t['peripherical-coord'][furthest_tum_pxl_idx]
 
                 pxl_coord = np.argwhere(t['mask'])
-                # all_dist_center = np.array([distance.euclidean(bed_center, coord) 
-                #                             for coord in pxl_coord])
                 
                 all_dist_center = np.linalg.norm(pxl_coord - bed_center_arr, axis=1)
 
@@ -98,6 +91,8 @@ class TissueCollection:
                 'distance-border': (min_dist * PIXEL_SIZE) / 1e3,
                 'peripherical-coord': all_min_pxls,
             })
+            if t['distance-border'] < 0.05:
+                t['distance-border'] = 0
 
     def compute_area_percentage(self, bed_mask):
         total_bed_pixels = np.count_nonzero(bed_mask)
@@ -134,56 +129,6 @@ class TissueCollection:
                     f"""unknown reference '{ref}', expected one of:
                     border, center."""
                 )
-
-    # def _raycast_all(self, cx, cy, p_dx_prob, p_dy_prob, p_dist_prob, b_coords):
-    #     """
-    #     Ray casting vectorisé sur les segments du contour.
-    #     Pour chaque pixel problématique, trouve la première intersection
-    #     du rayon (centre → pixel) avec le contour, au-delà du pixel.
-    #     """
-    #     # Segments du contour : A → B
-    #     A = b_coords[:-1]                          # (N, 2)
-    #     B = b_coords[1:]                           # (N, 2)
-    #     # Fermer le contour
-    #     A = np.vstack([A, b_coords[-1:]])
-    #     B = np.vstack([B, b_coords[:1]])
-    #     AB = B - A                                 # vecteurs de segments (N, 2)
-
-    #     n_prob = len(p_dx_prob)
-    #     r_corrected = np.full(n_prob, np.nan)
-
-    #     for i in range(n_prob):
-    #         dx, dy = p_dx_prob[i], p_dy_prob[i]
-    #         norm = np.hypot(dx, dy)
-    #         if norm == 0:
-    #             continue
-    #         # Direction unitaire du rayon
-    #         dx_n, dy_n = dx / norm, dy / norm
-
-    #         # Vecteur centre → A pour chaque segment
-    #         OA = A - np.array([cx, cy])            # (N, 2)
-
-    #         # Intersection rayon/segment par la règle de Cramer :
-    #         # t = distance le long du rayon jusqu'à l'intersection
-    #         # s = position sur le segment [0, 1]
-    #         denom = dx_n * AB[:, 1] - dy_n * AB[:, 0]   # (N,)
-
-    #         valid_denom = np.abs(denom) > 1e-10
-    #         t = np.full(len(A), np.inf)
-    #         s = np.full(len(A), np.inf)
-
-    #         t[valid_denom] = (OA[valid_denom, 0] * AB[valid_denom, 1]
-    #                         - OA[valid_denom, 1] * AB[valid_denom, 0]) / denom[valid_denom]
-    #         s[valid_denom] = (OA[valid_denom, 0] * dy_n
-    #                         - OA[valid_denom, 1] * dx_n) / denom[valid_denom]
-
-    #         # Intersection valide : t >= p_dist (devant le pixel) et s ∈ [0, 1]
-    #         valid = (t >= p_dist_prob[i] - 1e-6) & (s >= -1e-6) & (s <= 1 + 1e-6)
-
-    #         if valid.any():
-    #             r_corrected[i] = t[valid].min()
-
-    #     return r_corrected
 
     def _get_center_border_dist(self, bed_mask, bed_center, pixels_coord, local_dist=True):
         bed_contour, _ = cv2.findContours(

@@ -5,8 +5,7 @@ from scipy.ndimage import binary_fill_holes
 import tifffile
 
 
-from src.repartition.constants import CLASSES, COLOR2LABEL, MULTI_SLIDES_PATIENTS
-from src.repartition.data_analysis import id_patient
+from src.repartition.constants import CLASSES, COLOR2LABEL
 
 def is_valid_mask(mask, num_class=10):
     return np.all(mask < num_class)
@@ -63,7 +62,6 @@ def is_nested_mask(mask1, mask2, tol=1e-1, kernel_size=3):
 
     surrounding_pixels = mask1[surround_zone > 0]
     pxl_val, counts = np.unique(surrounding_pixels, return_counts=True)
-    print(pxl_val, counts/counts[0])
     if len(pxl_val) == 2:
         return counts[1]/counts[0] < tol
     elif pxl_val in [255, 1]:
@@ -77,7 +75,6 @@ def tif_to_real_mask(img_tif):
         msk = img_tif[CLASSES[cls],:,:]
         msk = (msk != 0).astype(np.uint8) # security
         for other_cls in CLASSES:
-            print(f"{cls} vs {other_cls}")
             if other_cls == cls:
                 continue
             other_msk = img_tif[CLASSES[other_cls],:,:]
@@ -108,10 +105,8 @@ def tif_to_filled_mask(img_tif):
 
 def get_annotation(path2annot, tif_to_mask):
     slides_annot = dict()
-    puzzle_slides = {p:{} for p in MULTI_SLIDES_PATIENTS}
     for annot_pth in path2annot:
         slide_name = annot_pth.split("/")[-1].split("-")[0]
-        print(slide_name)
         img = tifffile.imread(annot_pth)
         masks = tif_to_mask(img)
 
@@ -119,10 +114,4 @@ def get_annotation(path2annot, tif_to_mask):
             slide_name: masks
         })
 
-        id = id_patient(slide_name)
-        if id in MULTI_SLIDES_PATIENTS:
-            puzzle_slides[id].update({
-                slide_name: img
-            })
-
-    return slides_annot, puzzle_slides
+    return slides_annot

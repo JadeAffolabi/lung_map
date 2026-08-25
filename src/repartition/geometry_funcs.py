@@ -9,9 +9,7 @@ import matplotlib.pyplot as plt
 from scipy.sparse import dok_matrix
 from scipy.sparse.csgraph import shortest_path
 
-######################################################
 
-######################################################
 MIN_RATIO = 1e-6
 
 def find_center_skimg(mask):

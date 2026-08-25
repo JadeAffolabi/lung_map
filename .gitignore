@@ -1,4 +1,6 @@
-data/
+data/*
+!data/**/.gitkeep
+
 slurm_out/
 
 *.pdf
