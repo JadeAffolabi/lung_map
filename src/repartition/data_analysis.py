@@ -28,6 +28,7 @@ def add_distance_info(data, tissues, tissue_type, slide_name):
                     'distance-border': obj['distance-border'],
                     'distance-center': obj['distance-center'] if tissues.is_tumoral else None,
                     'min-dist-center': obj['min-dist-center'],
+                    'norm-dist-bord': obj['norm-dist-bord'],
                     'area': obj['area'],
                     'area-percentage': obj['area-percentage'],
                     'periph-coord': obj['peripherical-coord']
@@ -126,7 +127,9 @@ def compute_statistics(geo_data, tissue='tumor', by='id-slide'):
 
 def get_furthest_tumors(geo_data, by='id-slide'):
     tumor_geo = geo_data[geo_data['type']=='tumor']
+    total_area_pct = tumor_geo.groupby(by)["area-percentage"].sum()
     result = tumor_geo.loc[tumor_geo.groupby(by)['distance-center'].idxmax()]
+    result['area-percentage'] = total_area_pct.values
     result.drop(columns=['periph-coord', 'type', 'area'], inplace=True)
     result.reset_index(inplace=True)
     result.drop(columns=['index'], inplace=True)
@@ -135,7 +138,9 @@ def get_furthest_tumors(geo_data, by='id-slide'):
 
 def get_closest_tumors(geo_data, by='id-slide'):
     tumor_geo = geo_data[geo_data['type']=='tumor']
-    result = tumor_geo.loc[tumor_geo.groupby(by)['min-dist-center'].idxmin()]
+    total_area_pct = tumor_geo.groupby(by)["area-percentage"].sum()
+    result = tumor_geo.loc[tumor_geo.groupby('id-slide')['min-dist-center'].idxmin()]
+    result['area-percentage'] = total_area_pct.values
     result.drop(columns=['periph-coord', 'type', 'area'], inplace=True)
     result.reset_index(inplace=True)
     return result
@@ -178,8 +183,7 @@ def get_distrib_model(
         tissue_type='tumor', func_find_center= find_center_barycentre,
     ):
     distrib_list = []
-    eval_points = np.linspace(0, 1, 50)
-    bins = np.linspace(0, 1, 20)
+    eval_points = np.linspace(0, 1, 20)
 
     res = []
 
@@ -192,7 +196,7 @@ def get_distrib_model(
                 else:
                     hist = distrib['hist-proportion'][0]
                     distrib_list.append(hist / hist.sum())
-                    assert np.all(distrib['hist-proportion'][1] == bins), "Number of bins mismatch."
+                    assert np.all(distrib['hist-proportion'][1] == eval_points), "Number of bins mismatch."
         else:
             raise Exception(f"If model={model}, distribution_data must be given")
     elif model=='vect':
@@ -248,7 +252,7 @@ def extract_features(slides_annot, distance_data):
 
     furthest_tums = get_furthest_tumors(distance_data)
     min_dist_border = [
-        [furthest_tums[(furthest_tums['id-slide']==id_sld)]['distance-border'].values[0]]
+        [furthest_tums[(furthest_tums['id-slide']==id_sld)]['norm-dist-bord'].values[0]]
         for id_sld, masks in slides_annot.items() if np.any(masks['tumor'])
     ]
 
@@ -269,15 +273,33 @@ def extract_features(slides_annot, distance_data):
 
     return feats
 
+
 def compute_distance_matrix( 
         feats,
+        distrib=None,
+        distrib_type="kde",
     ):
     n = feats.shape[0] 
     dist_matrix = np.zeros((n, n))
 
+    eval_points = np.linspace(0, 1, 20)
+
     for i in range(n):
         for j in range(i+1, n):
             dist_matrix[i, j] = abs(feats[i][0] - feats[j][0])**(2) + np.linalg.norm(feats[i][1:3] - feats[j][1:3])
+                            
+            if (distrib is not None) and (distrib_type != "vect"):
+                if distrib_type == "kde":
+                    dist_matrix[i, j] += wasserstein_distance(
+                        eval_points, eval_points,
+                        distrib[i], distrib[j]
+                    )
+                elif distrib_type == "hist":
+                    bin_mids    = (eval_points[:-1] + eval_points[1:]) / 2
+                    dist_matrix[i, j] += wasserstein_distance(
+                                            bin_mids, bin_mids,
+                                            distrib[i], distrib[j]
+                                        )
 
     for i in range(n):
         for j in range(i+1, n):

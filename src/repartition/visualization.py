@@ -445,7 +445,7 @@ def plot_slide_grid(slides, figsize=(14,15), output=None, imgtitles=None):
 
         ax.set_xlim(x_min - w_pad, x_max + w_pad)
         ax.set_ylim(y_max + h_pad, y_min - h_pad)
-        ax.set_title(f'{f"slide {i}" if imgtitles is None else imgtitles[i]}', fontweight='bold')
+        ax.set_title(f'{f"slide {i}" if imgtitles is None else imgtitles[i]}', fontdict={'fontsize': 'small', 'fontweight': 'bold'})
         ax.axis('off')
 
     for k in range(len(slides), len(axes)):

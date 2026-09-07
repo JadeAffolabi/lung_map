@@ -57,6 +57,12 @@ class TissueCollection:
                 dist_centers = np.linalg.norm(t['peripherical-coord'] - bed_center_arr, axis=1)
                 furthest_tum_pxl_idx = np.argmax(dist_centers)
 
+                if t['distance-border'] == 0:
+                    norm_dist_bord = 0
+                else:
+                    norm_dist_bord = np.abs(1 - compute_normalize_distance(bed_mask, bed_center, t['peripherical-coord'][furthest_tum_pxl_idx], local_ratio=True))
+                t.update({'norm-dist-bord': norm_dist_bord})
+
                 t.update({'distance-center': (dist_centers[furthest_tum_pxl_idx] * PIXEL_SIZE) / 1e3})
                 t['peripherical-coord'] = t['peripherical-coord'][furthest_tum_pxl_idx]
 
