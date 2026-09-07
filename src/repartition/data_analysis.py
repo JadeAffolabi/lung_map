@@ -286,7 +286,7 @@ def compute_distance_matrix(
 
     for i in range(n):
         for j in range(i+1, n):
-            dist_matrix[i, j] = abs(feats[i][0] - feats[j][0])**(2) + np.linalg.norm(feats[i][1:3] - feats[j][1:3])
+            dist_matrix[i, j] = abs(feats[i][0] - feats[j][0])**(2) + np.linalg.norm(feats[i][1:] - feats[j][1:])
                             
             if (distrib is not None) and (distrib_type != "vect"):
                 if distrib_type == "kde":
