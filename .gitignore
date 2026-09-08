@@ -8,6 +8,7 @@ slurm_out/
 *.csv
 *.ckpt
 .html
+*.zip
 
 .env
 __pycache__/
