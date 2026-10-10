@@ -18,7 +18,7 @@ from PIL import Image
 
 from src.segmentation.constants import RAW_DATA_DIR, DIR_BCSS, DIR_LUAD, DIR_LCHUR, \
 CLASS_CONVERSION_BCSS, CLASS_CONVERSION_LUAD, CLASSES_TO_LABELS, PATH_SEG_DATA
-from src.repartition.data_loading import tif_to_real_mask
+from src.repartition.data_loading import refine_masks
 from src.segmentation.constants import CLASSES_TO_LABELS
 
 class DataPaths(ABC):
@@ -465,7 +465,7 @@ def create_dataset_shards(split_name, data_paths, out_dir, max_size=1e9, patch_s
 
             if is_lchur(mask_path):
                 mask_tif = tifffile.imread(mask_path)
-                annotations = tif_to_real_mask(mask_tif)
+                annotations = refine_masks(mask_tif)
                 mask = np.zeros((img.shape[0], img.shape[1]))
                 for cls in CLASSES_TO_LABELS:
                     if cls != 'other':

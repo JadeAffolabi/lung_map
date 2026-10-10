@@ -1,34 +1,59 @@
 import warnings
 
-import cv2
 import numpy as np
 import pandas as pd
 from sklearn.preprocessing import StandardScaler
 from scipy.stats import wasserstein_distance
 from scipy.spatial.distance import pdist
 
-from src.repartition.constants import CLASSES
-from src.repartition.geometry_funcs import find_center_barycentre, find_center_skeleton
+from src.repartition.geometry_funcs import find_center_barycentre
 from src.repartition.TissueCollection import *
-from skimage.morphology import skeletonize
 
-def id_patient(slide_name):
+def id_patient(slide_name: str):
+    """
+        Extract patient id from slide name.
+
+    Parameters
+    ----------
+    slide_name : str
+
+    Returns
+    -------
+        id : str
+    """
     if 'BC' in slide_name:
         return slide_name.split(".")[1]
     elif 'DS' in slide_name:
         return "_".join(slide_name.split("_")[:2])
     return slide_name.split("_")[0]
 
-def add_distance_info(data, tissues, tissue_type, slide_name):
+def add_distance_info(data, tissues, tissue_type, slide_name) -> list[dict]:
+    """
+        Add informations about the tissues to the data list.
+
+    Parameters
+    ----------
+    data : list[dict]
+        data list for all the slides.
+    tissues : TissueCollection
+        tissue collection for one slide.
+    tissue_type : str
+    slide_name : str
+
+    Returns
+    -------
+        data : list[dict]
+    """
     for i, obj in enumerate(tissues.get_objects()):
         data.append({
                     'id-patient': id_patient(slide_name),
                     'id-slide': slide_name,
                     'type': tissue_type,
-                    'distance-border': obj['distance-border'],
-                    'distance-center': obj['distance-center'] if tissues.is_tumoral else None,
+                    'component-id': i,
+                    'dist-border': obj['distance-border'],
+                    'dist-center': obj['distance-center'] if tissues.is_tumoral else None,
                     'min-dist-center': obj['min-dist-center'],
-                    'norm-dist-bord': obj['norm-dist-bord'],
+                    'norm-dist-border': obj['norm-dist-bord'],
                     'area': obj['area'],
                     'area-percentage': obj['area-percentage'],
                     'periph-coord': obj['peripherical-coord']
@@ -36,9 +61,33 @@ def add_distance_info(data, tissues, tissue_type, slide_name):
 
     return data
 
-def get_distribution(tissues, masks, tumor_bed,
-                     tissue_type='tumor', return_kde=False,
-                     return_hist=False, local_ratio=True):
+def get_distribution(
+        tissues: TissueCollection, masks: dict, tumor_bed: dict,
+        tissue_type='tumor', return_kde=False,
+        return_hist=False, local_ratio=True
+) -> dict:
+    """
+        Compute the distribution of the tissues pixels.
+
+    Parameters
+    ----------
+    tissues : TissueCollection
+        tissue collection of one type for one slide.
+    masks : dict
+        masks for all tissue type (tumor, necrosis, stroma)
+    tumor_bed : dict
+        tumor bed informations (center and mask)
+    tissue_type : str
+    return_kde : bool
+    return_hist : bool
+    local_ratio : bool
+        if true the normalized distance is the "distance relative locale" ,
+        else it is  the "distance relative globale".
+
+    Returns
+    -------
+        result : dict
+    """
     result = dict()
     all_tissues_dist = dict()
 
@@ -53,22 +102,46 @@ def get_distribution(tissues, masks, tumor_bed,
         })
 
     if return_hist:
-        for type, m in masks.items():
+        for t, m in masks.items():
             norm_dist_to_center = compute_normalize_distance(
                     tumor_bed['mask'], tumor_bed['center'],
                     np.argwhere(m), local_ratio=local_ratio,
             )
             all_tissues_dist.update({
-                type: norm_dist_to_center
+                t: norm_dist_to_center
             })
 
         result.update({
-            'hist-proportion': get_type_proportion_hist(all_tissues_dist, tissue_type)
+            'hist-proportion': get_proportion_hist(all_tissues_dist, tissue_type)
         })
 
     return result
 
-def get_tissues_data(slides_annotation, func_find_center, tissue_type='tumor', return_kde=False, return_hist=False, local_ratio=True):
+def get_tissues_data(
+        slides_annotation: dict, func_find_center, tissue_type='tumor',
+        return_kde=False, return_hist=False, local_ratio=True
+) -> tuple[pd.DataFrame, dict]:
+    """
+        Extract from slides annotations information such as distances and distribution of pixels
+        for a specific class (tumor, necrosis, stroma)
+
+    Parameters
+    ----------
+    slides_annotation : dict[str, dict]
+    func_find_center : callable
+        function to estimate the center of the tumor bed.
+    tissue_type : str
+        one of tumor, necrosis, stroma.
+    return_kde : bool
+    return_hist : bool
+    local_ratio : bool
+        if true the normalized distance is the "distance relative locale" ,
+        else it is  the "distance relative globale".
+
+    Returns
+    -------
+        distance_data, distribution_data : tuple[pd.DataFrame, tuple[np.ndarray, np.ndarray] | stats.gaussian_kde]
+    """
     distance_data = []
     distribution_data = {}
     for sld_name, masks in slides_annotation.items():
@@ -83,7 +156,7 @@ def get_tissues_data(slides_annotation, func_find_center, tissue_type='tumor', r
                         'mask': masks['tumor_bed'],
                         'center': center_info[0]['center']
                     }
-            except IndexError as e:
+            except IndexError:
                 continue
 
             tissues = TissueCollection(tissue_type, masks[tissue_type])
@@ -109,43 +182,83 @@ def get_tissues_data(slides_annotation, func_find_center, tissue_type='tumor', r
         else:
             continue
 
-    return pd.DataFrame(distance_data), distribution_data
+    distance_data = pd.DataFrame(distance_data)
+    distance_data_final = distance_data.loc[get_furthest_tumors(distance_data, by='id-slide')]
+    distance_data_final['min-dist-center'] = distance_data.loc[
+        get_closest_tumors(distance_data, by='id-slide')
+    ]['min-dist-center'].values
+    distance_data_final['area-percentage'] = get_total_area_pct(distance_data, by='id-slide')
+
+    distance_data_final.reset_index(inplace=True)
+    distance_data_final.drop(columns=['index', 'type', 'component-id', 'area'], inplace=True)
 
 
-def compute_statistics(geo_data, tissue='tumor', by='id-slide'):
-    grps = geo_data[geo_data['type'] == tissue].groupby(by)
-    result = grps.agg(
-        mean_dist_border=('distance-border', np.mean),
-        std_dist_border=('distance-border', np.std),
-        mean_dist_center=('distance-center', np.mean),
-        std_dist_center=('distance-center', np.std),
-        mean_area_percent=('area-percentage', np.mean),
-        std_area_percent=('area-percentage', np.std),
-        nb_tumor=('area', 'size')
-    )
-    return result
+    return distance_data_final, distribution_data
 
-def get_furthest_tumors(geo_data, by='id-slide'):
-    tumor_geo = geo_data[geo_data['type']=='tumor']
-    total_area_pct = tumor_geo.groupby(by)["area-percentage"].sum()
-    result = tumor_geo.loc[tumor_geo.groupby(by)['distance-center'].idxmax()]
-    result['area-percentage'] = total_area_pct.values
-    result.drop(columns=['periph-coord', 'type', 'area'], inplace=True)
-    result.reset_index(inplace=True)
-    result.drop(columns=['index'], inplace=True)
-    return result
+def get_furthest_tumors(data, by='id-slide'):
+    """
+        Returns the indices of the tumors components which are furthest from the center of the tumor bed.
 
+    Parameters
+    ----------
+    data : pd.DataFrame
+        dataframe containing the informations (distances, etc.) for each tumor component for every slide.
+    by : str
+        column name to group by.
 
-def get_closest_tumors(geo_data, by='id-slide'):
-    tumor_geo = geo_data[geo_data['type']=='tumor']
-    total_area_pct = tumor_geo.groupby(by)["area-percentage"].sum()
-    result = tumor_geo.loc[tumor_geo.groupby('id-slide')['min-dist-center'].idxmin()]
-    result['area-percentage'] = total_area_pct.values
-    result.drop(columns=['periph-coord', 'type', 'area'], inplace=True)
-    result.reset_index(inplace=True)
-    return result
+    Returns
+    -------
+        indices : pd.Series
+    """
+    return data.groupby(by)['dist-center'].idxmax()
 
-def ratio_border_tumor(masks):
+def get_closest_tumors(data, by='id-slide'):
+    """
+        Returns the indices of the tumors components which are closest to the center of the tumor bed.
+
+    Parameters
+    ----------
+    data : pd.DataFrame
+        dataframe containing the informations (distances, etc.) for each tumor component for every slide.
+    by : str
+        column name to group by.
+
+    Returns
+    -------
+        indices : pd.Series
+    """
+    return data.groupby(by)['min-dist-center'].idxmin()
+
+def get_total_area_pct(data, by='id-slide'):
+    """
+        Returns the sum of the area percentage for each element of the group specify by the "by" argument.
+
+    Parameters
+    ----------
+    data : pd.DataFrame
+        dataframe containing the informations (distances, etc.) for each tumor component for every slide.
+    by : str
+        column name to group by.
+
+    Returns
+    -------
+        values : pd.Series
+    """
+    return data.groupby(by)["area-percentage"].sum().values
+
+def ratio_border_tumor(masks: dict[str, np.ndarray]) -> float:
+    """
+        Compute the proportion of border occupied by tumors.
+
+    Parameters
+    ----------
+    masks : dict[str, np.ndarray]
+        set of mask for each class (tumor, necrosis, stroma, tumor_bed)
+
+    Returns
+    -------
+        ratio_border_tumor : float
+    """
     kernel = np.ones((3, 3), np.uint8)
     contour_bed = cv2.morphologyEx(masks['tumor_bed'].astype(np.uint8), cv2.MORPH_GRADIENT, kernel)
     contour_tumor = cv2.morphologyEx(masks['tumor'].astype(np.uint8), cv2.MORPH_GRADIENT, kernel)
@@ -156,15 +269,29 @@ def ratio_border_tumor(masks):
     common = cv2.bitwise_and(contour_bed_tol, contour_tumor)
     return np.count_nonzero(common) / np.count_nonzero(contour_bed)
 
-def get_type_proportion_hist(all_tissues_dist, tissue_type='tumor'):
+def get_proportion_hist(all_tissues_dist: dict, tissue_type='tumor'):
+    """
+        Compute a histogram of the tissue proportion with respect to the normalized distance.
+        ex: at midway (0.5) between center and border, there is 50% of tumor and 50% of others tissues.
+
+    Parameters
+    ----------
+    all_tissues_dist : dict
+        set of pixel distances for all tissue types (tumor, necrosis, stroma)
+    tissue_type
+
+    Returns
+    -------
+        proportion_hist, bins : tuple[np.ndarray, np.ndarray]
+    """
     bins = np.linspace(0, 1, 20)
     count_per_bin = {
-        type: np.histogram(all_tissues_dist[type], bins=bins)[0]
-        for type in all_tissues_dist.keys()
+        t: np.histogram(all_tissues_dist[t], bins=bins)[0]
+        for t in all_tissues_dist.keys()
     }
     sum_per_bin = np.zeros(len(bins)-1)
-    for type in all_tissues_dist.keys():
-        sum_per_bin += count_per_bin[type]
+    for t in all_tissues_dist.keys():
+        sum_per_bin += count_per_bin[t]
 
     with warnings.catch_warnings():
         warnings.filterwarnings(
@@ -182,10 +309,30 @@ def get_distrib_model(
         distribution_data=None, thresholds=None, slide_annotations=None,
         tissue_type='tumor', func_find_center= find_center_barycentre,
     ):
+    """
+        Return for each slide a vector of characteristics based on the distribution model chose.
+
+    Parameters
+    ----------
+    model : str
+        model type
+    distribution_data : dict
+        distribution data for each slide
+    thresholds : list[float]
+        different thresholds for the model "vector of presence".
+        ex: [0.2, 0.6, 0.8, 1]
+    slide_annotations : dict[str, dict]
+        slide annotations
+    tissue_type : str
+    func_find_center : callable
+        function to estimate the center.
+
+    Returns
+    -------
+        distrib : np.ndarray
+    """
     distrib_list = []
     eval_points = np.linspace(0, 1, 20)
-
-    res = []
 
     if model in ['kde', 'hist']:
         if distribution_data is not None:
@@ -208,7 +355,7 @@ def get_distrib_model(
                 if np.any(masks[tissue_type]):
                     try:
                         bed_center = func_find_center(masks['tumor_bed'])[0]['center']
-                    except IndexError as e:
+                    except IndexError:
                         continue
                     pixels_coord = np.argwhere(masks[tissue_type])
 
@@ -238,33 +385,45 @@ def get_distrib_model(
     return np.array(distrib_list)
 
 def extract_features(slides_annot, distance_data):
+    """
+        Extract some features from the slide informations.
+        Namely, the proportion of border occupied by tumors,
+        the smallest distance of tumors to the center and the distance to the border of the furthest tumor component.
+    Parameters
+    ----------
+    slides_annot : dict
+        slide annotations
+    distance_data : pd.DataFrame
+        dataframe containing the informations (distances, etc.) for each tumor component for every slide.
 
+    Returns
+    -------
+        features : np.ndarray
+    """
     tumor_border_contact = [
         [ratio_border_tumor(masks)]
         for masks in slides_annot.values() if np.any(masks['tumor'])
     ]
 
-    dist_center_closest_tum = get_closest_tumors(distance_data)
     min_dist_center = [
-        [dist_center_closest_tum[(dist_center_closest_tum['id-slide']==id_sld)]['min-dist-center'].values[0]]
+        [distance_data[(distance_data['id-slide']==id_sld)]['min-dist-center'].values[0]]
         for id_sld, masks in slides_annot.items() if np.any(masks['tumor'])
     ]
 
-    furthest_tums = get_furthest_tumors(distance_data)
-    min_dist_border = [
-        [furthest_tums[(furthest_tums['id-slide']==id_sld)]['norm-dist-bord'].values[0]]
+    norm_dist_border = [
+        [distance_data[(distance_data['id-slide']==id_sld)]['norm-dist-bord'].values[0]]
         for id_sld, masks in slides_annot.items() if np.any(masks['tumor'])
     ]
 
     tumor_border_contact = np.array(tumor_border_contact)
     min_dist_center = np.array(min_dist_center)
-    min_dist_border = np.array(min_dist_border)
+    norm_dist_border = np.array(norm_dist_border)
 
     feats = np.hstack(
         (
             tumor_border_contact,
             min_dist_center,
-            min_dist_border, 
+            norm_dist_border,
         )
     )
 
@@ -275,10 +434,26 @@ def extract_features(slides_annot, distance_data):
 
 
 def compute_distance_matrix( 
-        feats,
-        distrib=None,
+        feats : np.ndarray,
+        distrib: np.ndarray = None,
         distrib_type="kde",
-    ):
+    ) -> np.ndarray:
+    """
+        Calculate the distance or similarity between two slides based on their features.
+
+    Parameters
+    ----------
+    feats : np.ndarray, shape=(n, k)
+        The list of k features for n slides.
+    distrib : np.ndarray, shape=(n, p), optional
+        The list of distribution vector for n slides. Each distribution vector has p elements.
+    distrib_type : str, optional
+        distribution type if distrib is given.
+
+    Returns
+    -------
+        dist_matrix : np.ndarray, shape=(n, n)
+    """
     n = feats.shape[0] 
     dist_matrix = np.zeros((n, n))
 
@@ -286,7 +461,7 @@ def compute_distance_matrix(
 
     for i in range(n):
         for j in range(i+1, n):
-            dist_matrix[i, j] = abs(feats[i][0] - feats[j][0])**(2) + np.linalg.norm(feats[i][1:] - feats[j][1:])
+            dist_matrix[i, j] = abs(feats[i][0] - feats[j][0])**2 + np.linalg.norm(feats[i][1:] - feats[j][1:])
                             
             if (distrib is not None) and (distrib_type != "vect"):
                 if distrib_type == "kde":
@@ -307,34 +482,61 @@ def compute_distance_matrix(
 
     return dist_matrix
 
-def get_tumor_slides(slides_annotation):
-    return [(id, masks) for id, masks in slides_annotation.items() 
-            if np.any(masks['tumor'])]
+def get_tumor_slides(slides_annotation: dict) -> np.ndarray[tuple[str, np.ndarray]]:
+    """
+        Returns only the slides with annotated tumors.
 
-def get_slides_cluster(labels_tum, slides_annot, slides_tumor):
+    Parameters
+    ----------
+    slides_annotation : dict
+
+    Returns
+    -------
+        np.ndarray[[tuple[str, np.ndarray]]]
+    """
+    return np.array([(id_sld, masks) for id_sld, masks in slides_annotation.items()
+            if np.any(masks['tumor'])])
+
+def assign_cluster(labels_tum: np.ndarray, slides_annot: dict, slides_tumor: list) -> pd.DataFrame:
+    """
+        Assign clusters to slides.
+
+    Parameters
+    ----------
+    labels_tum : np.ndarray
+        predicted labels for slides with tumors.
+    slides_annot : dict[str, dict]
+        all annotated slides.
+    slides_tumor : list[tuple[str, np.ndarray]]
+        slides with tumors.
+    Returns
+    -------
+        pd.DataFrame
+    """
     df = pd.DataFrame(
-        [id_patient(sld_name) for sld_name in slides_annot.keys()],
-        columns=['id-patient']
+        [sld_name for sld_name in slides_annot.keys()],
+        columns=['id-slide']
     )
     df['cluster'] = 0
     for i, sld in enumerate(slides_tumor):
-        id = id_patient(sld[0])
-        df.loc[df['id-patient']==id, 'cluster'] = labels_tum[i] + 1
+        id_sld = id_patient(sld[0])
+        df.loc[df['id-slide']==id_sld, 'cluster'] = labels_tum[i] + 1
     return df
 
-def get_spread_dist(contours):
-    l = contours[:, :, 0].argmin()
-    r = contours[:, :, 0].argmax()
-    t = contours[:, :, 1].argmin()
-    b = contours[:, :, 1].argmax()
+def compute_tumor_dispersion(tumor_mask: np.ndarray, bed_mask: np.ndarray) -> float | None:
+    """
+        Compute the dispersion score.
+        See the "carnet expérimentation" for more details.
 
-    dist_lr = distance.euclidean(contours[l][0], contours[r][0])
-    dist_tb = distance.euclidean(contours[t][0], contours[b][0])
+    Parameters
+    ----------
+    tumor_mask : np.ndarray
+    bed_mask : np.ndarray
 
-    return max(dist_lr, dist_tb)
-
-def compute_tumor_spread(tumor_mask, bed_mask):
-
+    Returns
+    -------
+        float
+    """
     bed_contour, _ = cv2.findContours(
                 bed_mask.astype(np.uint8),
                 cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE
@@ -364,12 +566,23 @@ def compute_tumor_spread(tumor_mask, bed_mask):
     tumor_area = np.count_nonzero(tumor_mask)
     bed_area = np.count_nonzero(bed_mask)
 
-    m = min(1, l_tum/l_bed) + min(1, tumor_area / bed_area)**2 + empty_area/bed_area
+    m = min(1.0, l_tum/l_bed) + min(1.0, tumor_area/bed_area)**2 + empty_area/bed_area
 
     return m
 
-def get_diameter(contour):
+def get_diameter(contour: np.ndarray) -> float:
+    """
+        Compute the pairwise distance between all contour points and return the maximum distance.
 
+    Parameters
+    ----------
+    contour : np.ndarray
+        contour points.
+
+    Returns
+    -------
+        float
+    """
     distances = pdist(contour, metric='euclidean')
     
     return np.max(distances)

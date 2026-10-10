@@ -2,7 +2,6 @@
 import cv2
 import numpy as np
 from scipy.ndimage import find_objects
-import numpy as np
 from scipy.ndimage import distance_transform_edt
 from scipy import stats
 import textwrap
@@ -14,15 +13,30 @@ PIXEL_SIZE = ORIGINAL_MICRO_PER_PIXEL * DOWNSAMPLE_FACTOR
 MIN_RATIO = 1e-6
 
 class TissueCollection:
-
-    def __init__(self, name, mask) -> None:
+    """
+        A class to represent the collection of components of a tissue (tumor, necrosis, stroma) inside an image annotations.
+    """
+    def __init__(self, name: str, mask: np.ndarray) -> None:
         self.name = name
         self.mask = mask
         self._tissues = self._get_components(mask)
         self.is_tumoral = 'tumor' in name.lower()
         self._border_dist_map = None
-    
-    def _get_components(self, mask):
+
+    @staticmethod
+    def _get_components(mask: np.ndarray) -> list[dict]:
+        """
+            Extract from mask the different components (block) of the tissue.
+
+        Parameters
+        ----------
+        mask : np.ndarray
+            mask of the tissue
+
+        Returns
+        -------
+            components : list[dict]
+        """
         mask_u8 = (mask * 255).astype(np.uint8)
         num_labels, label_map = cv2.connectedComponents(mask_u8)
         components = []
@@ -50,7 +64,19 @@ class TissueCollection:
 
         return components
 
-    def compute_peripheral_tumors_distance_to_center(self, bed_mask, bed_center):
+    def compute_peripheral_tumors_distance_to_center(self, bed_mask: np.ndarray, bed_center: np.ndarray) -> None:
+        """
+            Calculate the distance from the bed center for each component of the tissue.
+
+        Parameters
+        ----------
+        bed_mask : np.ndarray
+        bed_center : np.ndarray
+
+        Returns
+        -------
+            None
+        """
         if self.is_tumoral:
             bed_center_arr = np.array(bed_center)
             for t in self._tissues:
@@ -78,7 +104,18 @@ class TissueCollection:
             for t in self._tissues:
                 t.update({'min-dist-center': None})
 
-    def compute_distance_to_bed_border(self, bed_mask):
+    def compute_distance_to_bed_border(self, bed_mask: np.ndarray) -> None:
+        """
+            Calculate the distance from the bed border for each component of the tissue.
+
+        Parameters
+        ----------
+        bed_mask : np.ndarray
+
+        Returns
+        -------
+            None
+        """
         mask = (bed_mask*255).astype(np.uint8)
 
         dist_map = distance_transform_edt(mask)
@@ -100,7 +137,18 @@ class TissueCollection:
             if t['distance-border'] < 0.05:
                 t['distance-border'] = 0
 
-    def compute_area_percentage(self, bed_mask):
+    def compute_area_percentage(self, bed_mask: np.ndarray) -> None:
+        """
+            Calculate the area percentage of each component of the tissue.
+
+        Parameters
+        ----------
+        bed_mask : np.ndarray
+
+        Returns
+        -------
+            None
+        """
         total_bed_pixels = np.count_nonzero(bed_mask)
         for t in self._tissues:
             t_pixels = np.count_nonzero(t['mask'])
@@ -108,73 +156,24 @@ class TissueCollection:
                 'area': t_pixels * (PIXEL_SIZE/1e3)**2,
                 'area-percentage': t_pixels / total_bed_pixels
             })
-
-    def get_histogram_pxl(self, bed_mask, ref="border", bed_center=None):
-        tissues_pxl_coord = np.argwhere(self.mask)
-        nb_pxl = len(tissues_pxl_coord)
-        if ref == 'border':
-            if self._border_dist_map is not None:
-                dist_map = self._border_dist_map
-            else:
-                dist_map = distance_transform_edt(bed_mask)
-                if dist_map is None:
-                    return None
-
-            dist_map_filtered = (dist_map[self.mask.astype(bool)] - 1) * (PIXEL_SIZE/1e3)
-            hist, bins = np.histogram(dist_map_filtered, bins='scott')
-            return hist/nb_pxl, bins
-
-        elif ref == 'center':
-            assert bed_center is not None, "bed_center should not be None."
-            dist_to_bed_center = np.linalg.norm(tissues_pxl_coord - np.array(bed_center), axis=1) * (PIXEL_SIZE/1e3)
-            hist, bins = np.histogram(dist_to_bed_center, bins='scott')
-            return hist/nb_pxl, bins
-
-        else:
-            raise NotImplementedError(
-                    f"""unknown reference '{ref}', expected one of:
-                    border, center."""
-                )
-
-    def _get_center_border_dist(self, bed_mask, bed_center, pixels_coord, local_dist=True):
-        bed_contour, _ = cv2.findContours(
-            bed_mask.astype(np.uint8),
-            cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE
-        )
-        b_coords = bed_contour[0].squeeze()
-        cx, cy = bed_center[1], bed_center[0]
-
-        b_dx = b_coords[:, 0] - cx
-        b_dy = b_coords[:, 1] - cy
-        b_theta = np.arctan2(b_dy, b_dx)
-        b_r = np.hypot(b_dx, b_dy)
-
-        p_x = pixels_coord[:, 1]
-        p_y = pixels_coord[:, 0]
-        p_dx = p_x - cx
-        p_dy = p_y - cy
-        p_theta = np.arctan2(p_dy, p_dx)
-
-        if local_dist:
-            sort_idx = np.lexsort((b_r, b_theta))
-            b_theta_sorted = b_theta[sort_idx]
-            b_r_sorted = b_r[sort_idx]
-
-            unique_mask = np.append([True], b_theta_sorted[1:] != b_theta_sorted[:-1])
-            theta_unique = b_theta_sorted[unique_mask]
-            r_unique = b_r_sorted[unique_mask]
-            theta_unique = np.concatenate(([theta_unique[0] - 2*np.pi],
-                                            theta_unique,
-                                        [theta_unique[-1] + 2*np.pi]))
-            r_unique = np.concatenate(([r_unique[0]], r_unique, [r_unique[-1]]))
-
-            center_border_dist = np.interp(p_theta, theta_unique, r_unique)
-        else:
-            center_border_dist = np.max(b_r)
     
-        return center_border_dist
-    
-    def _compute_distribution(self, kind, distances):
+    def _compute_distribution(
+            self, kind: str, distances: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray] | stats.gaussian_kde:
+        """
+            Compute the distribution of pixels distance.
+
+        Parameters
+        ----------
+        kind : str
+            the type of distribution to compute.
+        distances : np.ndarray
+            the pixels distance.
+        Returns
+        -------
+            dist : tuple[np.ndarray, np.ndarray] | scipy.stats.gaussian_kde
+                the distribution of pixels distance.
+        """
         nb_pxl = len(distances)
         if kind == 'hist':
             hist, bins = np.histogram(distances, bins='scott')
@@ -188,8 +187,34 @@ class TissueCollection:
                 hist, kde."""
             )
 
-    def get_distribution(self, bed_mask, ref="border", bed_center=None,
-                        kind='kde', norm_dist=True, local_ratio=True):
+    def get_distribution(
+            self, bed_mask: np.ndarray, ref="center", bed_center: np.ndarray = None,
+            kind='kde', norm_dist=True, local_ratio=True
+    ) -> tuple[np.ndarray, np.ndarray] | stats.gaussian_kde | None:
+        """
+            Compute the distribution of the tissues pixels.
+
+        Parameters
+        ----------
+        bed_mask : np.ndarray
+            mask of the tumor bed.
+        ref : str
+            the reference point to compute the pixels distance.
+        bed_center : np.ndarray
+            coordinates of the bed center.
+        kind : str
+            the type of distribution to compute. Required if ref is "center".
+        norm_dist : bool
+            if true compute the normalized distance, else the distances are in millimeters.
+        local_ratio : bool
+            if true the normalized distance is the "distance relative locale" ,
+            else it is  the "distance relative globale".
+
+        Returns
+        -------
+            dist : tuple[np.ndarray, np.ndarray] | scipy.stats.gaussian_kde
+                the distribution of pixels distance.
+        """
         tissues_pxl_coord = np.argwhere(self.mask)
 
         if ref == 'border':
@@ -209,8 +234,6 @@ class TissueCollection:
                     bed_mask, bed_center, tissues_pxl_coord, local_ratio
                 )
             else:
-                # dist_to_bed_center = [distance.euclidean(bed_center, coord) * (PIXEL_SIZE/1e3)
-                #                        for coord in tissues_pxl_coord]
                 dist_to_bed_center = np.linalg.norm(tissues_pxl_coord - np.array(bed_center), axis=1) * (PIXEL_SIZE/1e3)
 
             distances = dist_to_bed_center
@@ -223,42 +246,8 @@ class TissueCollection:
 
         return self._compute_distribution(kind, distances)
 
-    def get_histogram_obj(self, ref="border", nb_bin=5):
-        nb_obj = len(self._tissues)
-        if ref == 'border':
-            dist_to_border = [t['distance-border'] for t in self._tissues]
-            hist, bins = np.histogram(dist_to_border, bins=nb_bin)
-            return hist/nb_obj, bins
-        elif ref == 'center':
-            dist_to_bed_center = [t['distance-center'] for t in self._tissues]
-            hist, bins = np.histogram(dist_to_bed_center, bins=nb_bin)
-            return hist/nb_obj, bins
-        else:
-            raise NotImplementedError(
-                    f"""unknown reference '{ref}', expected one of:
-                    border, center."""
-                )
-
     def get_objects(self):
         return self._tissues
-
-    def get_top_k(self, k=3, mode="close", ref="border"):
-        if ref in ['border', 'center']:
-            dist_list = [t[f'distance-{ref}'] for t in self._tissues]
-            sorted_indices = np.argsort(dist_list)
-            if mode == 'close':
-                top_k_idx = sorted_indices[:k]
-            elif mode == 'far':
-                top_k_idx = sorted_indices[-k:]
-            else:
-                raise NotImplementedError(
-                f"""unknown mode '{mode}', expected one of 'close', 'far'."""
-                )
-        else:
-            raise NotImplementedError(
-                f"""unknown reference '{ref}', expected one of 'border', 'center'."""
-            )
-        return [t for idx, t in enumerate(self._tissues) if idx in top_k_idx]
 
     def __iter__(self):
         return iter(self._tissues)
@@ -281,112 +270,187 @@ class TissueCollection:
         return str_repr
 
 def compute_normalize_distance(bed_mask, bed_center, pixels_coord, local_ratio=True):
-        bed_contour, _ = cv2.findContours(
-            bed_mask.astype(np.uint8),
-            cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE
-        )
+    """
+        Compute the normalized distance of pixels from the bed center.
+        The normalization is done by dividing the distance to the center
+        by the distance from the center to the pixel border behind the current pixel.
+        The cartesian coordinates are convert to polar coordinates in order to easily estimate
+        the distance between the center and the pixel border.
 
-        # OPTIMISATION : Lissage du contour. Évite d'avoir un segment par pixel de bordure
-        # ce qui divisera par 10 ou 100 le temps du raycasting.
-        epsilon = 0.001 * cv2.arcLength(bed_contour[0], True)
-        approx = cv2.approxPolyDP(bed_contour[0], epsilon, True)
-        b_coords = approx.reshape(-1, 2) # reshape pour éviter un crash si l'approximation ne donne que 2 points
+    Parameters
+    ----------
+    bed_mask : np.ndarray
+        mask of the tumor bed.
+    bed_center : np.ndarray
+        coordinates of the bed center.
+    pixels_coord : np.ndarray
+        coordinates of the pixels.
+    local_ratio : bool
+        if true the normalized distance is the "distance relative locale" ,
+        else it is  the "distance relative globale".
 
-        cx, cy = bed_center[1], bed_center[0]
+    Returns
+    -------
+        norm_dist : np.ndarray
+            the normalized distances.
+    """
+    bed_contour, _ = cv2.findContours(
+        bed_mask.astype(np.uint8),
+        cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE
+    )
 
-        b_dx = b_coords[:, 0] - cx
-        b_dy = b_coords[:, 1] - cy
-        b_theta = np.arctan2(b_dy, b_dx)
-        b_r = np.hypot(b_dx, b_dy)
+    # OPTIMISATION : Lissage du contour. Évite d'avoir un segment par pixel de bordure
+    # pour réduire le temps d'exécution.
+    epsilon = 0.001 * cv2.arcLength(bed_contour[0], True)
+    approx = cv2.approxPolyDP(bed_contour[0], epsilon, True)
+    b_coords = approx.reshape(-1, 2) # reshape pour éviter un crash si l'approximation ne donne que 2 points
 
-        is_single_pixel = np.ndim(pixels_coord) == 1
-        pixels_coord = np.atleast_2d(pixels_coord)
+    cx, cy = bed_center[1], bed_center[0]
 
-        p_x = pixels_coord[:, 1] 
-        p_y = pixels_coord[:, 0]
-        p_dx = p_x - cx
-        p_dy = p_y - cy
-        p_theta = np.arctan2(p_dy, p_dx)
-        p_dist = np.hypot(p_dx, p_dy)
+    b_dx = b_coords[:, 0] - cx
+    b_dy = b_coords[:, 1] - cy
+    b_theta = np.arctan2(b_dy, b_dx)
+    b_r = np.hypot(b_dx, b_dy)
 
-        if local_ratio:
-            sort_idx = np.lexsort((b_r, b_theta))
-            b_theta_sorted = b_theta[sort_idx]
-            b_r_sorted = b_r[sort_idx]
+    is_single_pixel = np.ndim(pixels_coord) == 1
+    pixels_coord = np.atleast_2d(pixels_coord)
 
-            unique_mask = np.append([True], b_theta_sorted[1:] != b_theta_sorted[:-1])
-            theta_unique = b_theta_sorted[unique_mask]
-            r_unique = b_r_sorted[unique_mask]
-            theta_unique = np.concatenate(([theta_unique[0] - 2*np.pi],
-                                            theta_unique,
-                                        [theta_unique[-1] + 2*np.pi]))
-            r_unique = np.concatenate(([r_unique[0]], r_unique, [r_unique[-1]]))
+    p_x = pixels_coord[:, 1]
+    p_y = pixels_coord[:, 0]
+    p_dx = p_x - cx
+    p_dy = p_y - cy
+    p_theta = np.arctan2(p_dy, p_dx)
+    p_dist = np.hypot(p_dx, p_dy)
 
-            r_boundary = np.interp(p_theta, theta_unique, r_unique)
-            safe_r = np.where(r_boundary == 0, 1e-9, r_boundary)
-            ratio = p_dist / safe_r
+    if local_ratio:
+        sort_idx = np.lexsort((b_r, b_theta))
+        b_theta_sorted = b_theta[sort_idx]
+        b_r_sorted = b_r[sort_idx]
 
-            problematic = ratio > 1
+        unique_mask = np.append([True], b_theta_sorted[1:] != b_theta_sorted[:-1])
+        theta_unique = b_theta_sorted[unique_mask]
+        r_unique = b_r_sorted[unique_mask]
+        theta_unique = np.concatenate(([theta_unique[0] - 2*np.pi],
+                                        theta_unique,
+                                    [theta_unique[-1] + 2*np.pi]))
+        r_unique = np.concatenate(([r_unique[0]], r_unique, [r_unique[-1]]))
 
-            if problematic.any():
-                prob_idx = np.where(problematic)[0]
+        r_boundary = np.interp(p_theta, theta_unique, r_unique)
+        safe_r = np.where(r_boundary == 0, 1e-9, r_boundary)
+        ratio = p_dist / safe_r
 
-                r_corrected = raycast_all(
-                    cx, cy,
-                    p_dx[problematic], p_dy[problematic], p_dist[problematic],
-                    b_coords
-                )
+        problematic = ratio > 1
 
-                found = ~np.isnan(r_corrected)
-                ratio[prob_idx[found]] = p_dist[problematic][found] / r_corrected[found]
+        if problematic.any():
+            prob_idx = np.where(problematic)[0]
 
-        else:
-            r_max = np.max(b_r)
-            ratio = p_dist / r_max
+            r_corrected = raycast_all(
+                cx, cy,
+                p_dx[problematic], p_dy[problematic], p_dist[problematic],
+                b_coords
+            )
 
-        return ratio[0] if is_single_pixel else ratio
+            found = ~np.isnan(r_corrected)
+            ratio[prob_idx[found]] = p_dist[problematic][found] / r_corrected[found]
 
-def raycast_all(cx, cy, p_dx_prob, p_dy_prob, p_dist_prob, b_coords):
-        # Segments du contour : A → B
-        A = b_coords[:-1]                          # (N, 2)
-        B = b_coords[1:]                           # (N, 2)
-        # Fermer le contour
-        A = np.vstack([A, b_coords[-1:]])
-        B = np.vstack([B, b_coords[:1]])
-        AB = B - A                                 # vecteurs de segments (N, 2)
+    else:
+        r_max = np.max(b_r)
+        ratio = p_dist / r_max
 
-        n_prob = len(p_dx_prob)
-        r_corrected = np.full(n_prob, np.nan)
+    return ratio[0] if is_single_pixel else ratio
 
-        for i in range(n_prob):
-            dx, dy = p_dx_prob[i], p_dy_prob[i]
-            norm = np.hypot(dx, dy)
-            if norm == 0:
-                continue
-            # Direction unitaire du rayon
-            dx_n, dy_n = dx / norm, dy / norm
+def raycast_all(cx, cy, p_dx, p_dy, p_dist, b_coords):
+    """
+        Compute the distance between the center and the pixel border by ray cast.
+        It is done by resolving the equality between the ray equation and the line
+        segment equation.
 
-            # Vecteur centre → A pour chaque segment
-            OA = A - np.array([cx, cy])            # (N, 2)
+    Parameters
+    ----------
+    cx : int
+        x coordinate of the center.
+    cy : int
+        y coordinate of the center.
+    p_dx : np.ndarray
+        x coordinates of the pixels.
+    p_dy : np.ndarray
+        y coordinates of the pixels.
+    p_dist : np.ndarray
+        pixels distance to the center.
+    b_coords : np.ndarray
+        border pixels coordinate.
 
-            # Intersection rayon/segment par la règle de Cramer :
-            # t = distance le long du rayon jusqu'à l'intersection
-            # s = position sur le segment [0, 1]
-            denom = dx_n * AB[:, 1] - dy_n * AB[:, 0]   # (N,)
+    Returns
+    -------
+        r_corrected : np.ndarray
+            border pixels distance to the center.
+    """
+    # contour segments : A → B
+    a = b_coords[:-1]                          # (N, 2)
+    b = b_coords[1:]                           # (N, 2)
 
-            valid_denom = np.abs(denom) > 1e-10
-            t = np.full(len(A), np.inf)
-            s = np.full(len(A), np.inf)
+    a = np.vstack([a, b_coords[-1:]])
+    b = np.vstack([b, b_coords[:1]])
+    ab = b - a                                 # (N, 2)
 
-            t[valid_denom] = (OA[valid_denom, 0] * AB[valid_denom, 1]
-                            - OA[valid_denom, 1] * AB[valid_denom, 0]) / denom[valid_denom]
-            s[valid_denom] = (OA[valid_denom, 0] * dy_n
-                            - OA[valid_denom, 1] * dx_n) / denom[valid_denom]
+    n_prob = len(p_dx)
+    r_corrected = np.full(n_prob, np.nan)
 
-            # Intersection valide : t >= p_dist (devant le pixel) et s ∈ [0, 1]
-            valid = (t >= p_dist_prob[i] - 1e-6) & (s >= -1e-6) & (s <= 1 + 1e-6)
+    for i in range(n_prob):
+        dx, dy = p_dx[i], p_dy[i]
+        norm = np.hypot(dx, dy)
+        if norm == 0:
+            continue
+        # unit vector coord
+        dx_n, dy_n = dx / norm, dy / norm
 
-            if valid.any():
-                r_corrected[i] = t[valid].min()
+        # Vector center → a for each segment
+        oa = a - np.array([cx, cy])            # (N, 2)
 
-        return r_corrected
+        denom = dx_n * ab[:, 1] - dy_n * ab[:, 0]   # (N,)
+        valid_denom = np.abs(denom) > 1e-10
+
+        t = np.full(len(a), np.inf) # length of the ray
+        s = np.full(len(a), np.inf) # position on the ab segment
+
+        # solving equations
+        t[valid_denom] = (oa[valid_denom, 0] * ab[valid_denom, 1]
+                        - oa[valid_denom, 1] * ab[valid_denom, 0]) / denom[valid_denom]
+        s[valid_denom] = (oa[valid_denom, 0] * dy_n
+                        - oa[valid_denom, 1] * dx_n) / denom[valid_denom]
+
+        # valid intersection valid : t >= p_dist (behind the tissue pixel) and s ∈ [0, 1]
+        valid = (t >= p_dist[i] - 1e-6) & (s >= -1e-6) & (s <= 1 + 1e-6)
+
+        if valid.any():
+            r_corrected[i] = t[valid].min()
+
+    return r_corrected
+
+def compute_normalize_distance_2(bed_mask, bed_center, pixels_coord):
+    """
+        Compute the normalized distance of pixels from the bed center.
+        The normalization is done by dividing the distance to the bed center
+        by the distance to the nearest border's pixel.
+
+    Parameters
+    ----------
+    bed_mask : np.ndarray
+        mask of the tumor bed.
+    bed_center : np.ndarray
+        coordinates of the bed center.
+    pixels_coord : np.ndarray
+        coordinates of the pixels.
+
+    Returns
+    -------
+        norm_dist : np.ndarray
+            the normalized distances.
+    """
+
+    dist_map = distance_transform_edt(bed_mask)
+
+    dist_center = np.linalg.norm(pixels_coord - bed_center, axis=1)
+    norm_dist = dist_center / dist_map[pixels_coord[:, 0], pixels_coord[:, 1]]
+
+    return norm_dist

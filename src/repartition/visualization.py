@@ -2,23 +2,34 @@ import math
 import os
 
 import matplotlib.pyplot as plt
+from matplotlib.figure import Figure
+import pandas as pd
 from matplotlib.backends.backend_pdf import PdfPages
 import matplotlib.patches as mpatches
 from matplotlib.lines import Line2D
 import numpy as np
-import cv2
 
 from src.repartition.constants import CLASS_NAMES
 
 
-def normalize(mask):
+def normalize(mask: np.ndarray) -> np.ndarray:
     arr = mask.astype(np.float32)
     mn, mx = arr.min(), arr.max()
     return (arr - mn) / (mx - mn + 1e-9)
 
 
-def make_composite(masks):
+def make_composite(masks: dict[str, np.ndarray]) -> np.ndarray:
+    """
+        Merge the masks into a single image array.
 
+    Parameters
+    ----------
+    masks : dict
+
+    Returns
+    -------
+        img : np.ndarray
+    """
     stack_img = np.stack([normalize(m) for k, m in masks.items() if k != 'tumor_bed'], axis=-1)
     
     soft_colors = np.array([
@@ -33,8 +44,20 @@ def make_composite(masks):
     
     return np.clip(img_rgb, 0, 1)
 
-def make_image_masks(masks, slide_name=None):
-    COLORMAPS   = ["Blues", "Greens", "Reds", "Purples"]
+def make_image_masks(masks: dict, slide_name: str = None) -> Figure:
+    """
+        Create an image in which each mask is shown.
+
+    Parameters
+    ----------
+    masks : dict
+    slide_name : str, optional
+
+    Returns
+    -------
+        fig : Figure
+    """
+    colormaps   = ["Blues", "Greens", "Reds", "Purples"]
     n_classes  = len(CLASS_NAMES)
     n_cols     = n_classes + 1
 
@@ -47,7 +70,7 @@ def make_image_masks(masks, slide_name=None):
     axes[0].set_title("Composite\n(RGB fusion)", fontsize=9, fontweight="bold")
     axes[0].axis("off")
 
-    for i, (cname, cmap) in enumerate(zip(CLASS_NAMES, COLORMAPS)):
+    for i, (cname, cmap) in enumerate(zip(CLASS_NAMES, colormaps)):
         ax = axes[i + 1]
         ax.imshow(masks[cname], cmap=cmap, vmin=0, vmax=1)
         ax.set_title(cname, fontsize=9)
@@ -56,7 +79,30 @@ def make_image_masks(masks, slide_name=None):
     plt.tight_layout()
     return fig
 
-def make_image_furthest_tissue(masks, bed_center, tissue_objs, title, tissue_name):
+def make_image_furthest_tissue(
+        masks: dict, bed_center: np.ndarray,
+        tissue_objs: pd.DataFrame, title: str, tissue_name: str
+) -> Figure:
+    """
+        Make a colored image of a slide based of its annotation masks, and show the furthest tissue point.
+
+    Parameters
+    ----------
+    masks : dict
+        the masks for every tissue type (tumor, necrosis, stroma)
+    bed_center : np.ndarray
+        the coordinates of the bed center.
+    tissue_objs : pd.DataFrame
+        some information about the slide.
+    title : str
+        image title
+    tissue_name : str
+        name of the tissue (tumor, necrosis, stroma)
+
+    Returns
+    -------
+        fig : Figure
+    """
     img_rgb = make_composite(masks)
     bed_mask = masks['tumor_bed']
 
@@ -80,9 +126,8 @@ def make_image_furthest_tissue(masks, bed_center, tissue_objs, title, tissue_nam
     ax.plot(bed_center[1], bed_center[0], marker="*", color="black",
              ms=10, mew=0.2, mec='black', zorder=5, label='tumor bed center')
 
-    idx_max = tissue_objs['distance-center'].idxmax()
-    y, x = tissue_objs['periph-coord'].loc[idx_max]
-    max_dist = tissue_objs['distance-center'].loc[idx_max]    
+    y, x = tissue_objs['periph-coord']
+    max_dist = tissue_objs['dist-center']
 
     ax.plot(x, y, marker="v", color="yellow", ms=5, markeredgecolor='black')
 
@@ -117,7 +162,21 @@ def make_image_furthest_tissue(masks, bed_center, tissue_objs, title, tissue_nam
     ax.axis("off")
     return fig
 
-def make_image(masks, title):
+def make_image(masks: dict, title: str) -> Figure:
+    """
+        Create a color image by layering the masks.
+
+    Parameters
+    ----------
+    masks : dict
+        the masks for every tissue type (tumor, necrosis, stroma).
+    title : str
+        image title.
+
+    Returns
+    -------
+        fig : Figure
+    """
     img_rgb = make_composite(masks)
     img_rgb = (img_rgb * 255).astype(np.uint8)
 
@@ -153,37 +212,29 @@ def make_image(masks, title):
     ax.axis("off")
     return fig
 
-def draw_pie_chart(labels, sizes, colors):    
-    fig, ax = plt.subplots()
-    ax.pie(sizes, colors = colors,
-            labels=labels, autopct='%1.1f%%', 
-            startangle=90, textprops={
-                'size': 'smaller',
-                'rotation': 45,
-            }
-    )
+def export_mask_pdf(slide_annotations: dict, output="masques.pdf", saveimg=False) -> None:
+    """
+        Export for each slide the display its masks.
 
-    ax.axis('equal')
-    ax.legend()
-    plt.tight_layout()
-    return fig
+    Parameters
+    ----------
+    slide_annotations : dict [str, dict]
+    output : str
+        name of the output pdf file.
+    saveimg : bool
+        if True, save the image for each slide.
 
-def draw_bar_plot(labels, sizes, colors):
-    fig, ax = plt.subplots()
-    ax.bar(range(len(labels)), sizes, label=labels, color=colors)
+    Returns
+    -------
+        None
+    """
 
-    ax.set_ylabel('Pourcentage')
-    ax.set_title('Proportion de tissues (nécrose, stroma, tumeur) par lame')
-    ax.legend(title='Type')
-    return fig
-
-def export_mask_pdf(slide_annotations, output="masques.pdf", saveimg=False):
-
-    plt.ioff() 
+    plt.ioff() # Disable interactive mode.
     
     if saveimg:
         savedir = f"./{output.split('.')[0]}"
         os.makedirs(savedir, exist_ok=True)
+    else: savedir = "."
 
     with PdfPages(output) as pdf:
         for sld_name in slide_annotations:
@@ -198,14 +249,37 @@ def export_mask_pdf(slide_annotations, output="masques.pdf", saveimg=False):
         d = pdf.infodict()
         d["Title"]   = "Visualisation masques"
 
-def export_furthest_tissue_pdf(slide_annotations, func_find_center, tissues_geometrics,
-                                tissue_type='tumor', output="furthest_tumors.pdf", saveimg=False):
+def export_furthest_tissue_pdf(
+        slide_annotations: dict, func_find_center, tissues_geometrics: pd.DataFrame,
+        tissue_type='tumor', output="furthest_tumors.pdf", saveimg=False
+) -> None:
+    """
+        Export for each slide the colored image with the position of the furthest tissue.
 
+    Parameters
+    ----------
+    slide_annotations : dict [str, dict]
+    func_find_center : callable
+        function to estimate the center of the tumor bed.
+    tissues_geometrics : pd.DataFrame
+        some data about each slide, such as the coordinate and  the distance
+        of the furthest tissue from the center of the tumor bed.
+    tissue_type : str
+    output : str
+        name of the output pdf file.
+    saveimg : bool
+        if True, save the image for each slide.
+
+    Returns
+    -------
+        None
+    """
     plt.ioff()
-    
+
     if saveimg:
         savedir = f"./{output.split('.')[0]}"
         os.makedirs(savedir, exist_ok=True)
+    else: savedir = "."
 
     with PdfPages(output) as pdf:
         i = 1
@@ -244,10 +318,27 @@ def export_furthest_tissue_pdf(slide_annotations, func_find_center, tissues_geom
         d["Title"]   = "Visualization furthest tumor per slide"
 
 def export_tumor_dispersion_pdf(
-        slides,
-        scores,
+        slides: np.ndarray, scores: np.ndarray,
         output="tumors dispersion score.pdf", saveimg=False
-    ):
+) -> None:
+    """
+        Export for each slide the colored image with the dispersion score.
+
+    Parameters
+    ----------
+    slides : np.ndarray
+        slides annotations with tumor
+    scores : np.ndarray
+        dispersion scores in the same order as slides
+    output : str
+        name of the output pdf file.
+    saveimg : bool
+        if True, save the image for each slide.
+
+    Returns
+    -------
+        None
+    """
     with PdfPages(output) as pdf:
         i = 1
         for (sld_name, masks), score in zip(slides, scores):
@@ -274,79 +365,36 @@ def export_tumor_dispersion_pdf(
             plt.close(fig)
             i += 1
 
-def export_tissues_proportion(all_tissues_areas, output='tissues_proportion.pdf',
-                               draw_type='bar', saveimg=False):
-     with PdfPages(output) as pdf:
-        for sld_name in all_tissues_areas['id-slide'].unique():
-            tissue_areas = all_tissues_areas[all_tissues_areas['id-slide']==sld_name]
-            label2color = {
-                'necrosis': 'blue',
-                'stroma': 'green',
-                'tumor': 'red'
-            }
+def plot_distribution(
+    distrib: dict, show='hist-proportion',
+    figsize=(12, 8), suptitle="Titre Général",
+    xlabel="Valeurs de x", ylabel="Valeurs de y",
+) -> None:
+    """
+        Plot the distribution of tumor pixels for every slide.
 
-            sizes, colors, labels = [], [], []
-            for l in CLASS_NAMES:
-                l_percent = tissue_areas[tissue_areas['type']==l]['area-percentage']
-                if not l_percent.empty:
-                    sizes.append(l_percent.values[0])
-                    colors.append(label2color[l])
-                    labels.append(l)
+    Parameters
+    ----------
+    distrib : dict
+        data containing a modeling of tumor pixels distribution for each slide.
+    show : str
+        argument to specify which model of distribution to show (kde or hist-proportion)
+    figsize : tuple[int, int]
+        size of the figure.
+    suptitle : str
+        title of the figure.
+    xlabel : str
+        label of the x-axis.
+    ylabel : str
+        label of the y-axis.
 
-            match draw_type:
-                case 'bar':
-                    fig = draw_bar_plot(labels, sizes, colors)
-                case 'pie':
-                    fig = draw_pie_chart(labels, sizes, colors)
-                case _:
-                    raise NotImplementedError(
-                        f"""unknown draw_type '{draw_type}', expected one of:
-                        bar, pie."""
-                    )
-            fig.suptitle(sld_name, fontweight='bold')
-            pdf.savefig(
-                fig,
-                bbox_inches='tight',
-                pad_inches=0, 
-                dpi=300,            # Increases image quality
-                transparent=False
-            )
-
-            if saveimg:
-                savedir = f"./{output.split('.')[0]}"
-                if not os.path.exists(savedir):
-                    os.mkdir(savedir)
-                fig.savefig(f"{savedir}/img_{sld_name}.png")
-            plt.close(fig)
-
-        d = pdf.infodict()
-        d["Title"]   = "Visualization tissue proportion per slide"
-
-def plot_distribution(distrib, show='hist-proportion',
-                       ref='center', figsize=(12, 8), 
-                       suptitle="Titre Général",
-                       xlabel="Valeurs de x", 
-                       ylabel="Valeurs de y",
-                       save_imgs=None):
-    
+    Returns
+    -------
+        None
+    """
     n = len(distrib)
     if n == 0: return
-    
-    # --- 1. Calcul des échelles globales ---
-    global_x_min, global_x_max = float('inf'), float('-inf')
-    global_y_max = 0
-    
-    for sld_name, dist in distrib.items():
-        if show == 'hist':
-            counts = dist['hist'][ref][0]
-            edges = dist['hist'][ref][1]
-            if len(counts) > 0:
-                global_y_max = max(global_y_max, np.max(counts))
-            if len(edges) > 0:
-                global_x_min = min(global_x_min, np.min(edges))
-                global_x_max = max(global_x_max, np.max(edges))
-    # ---------------------------------------
-    
+
     cols = math.ceil(math.sqrt(n))
     rows = math.ceil(n / cols)
     
@@ -374,37 +422,17 @@ def plot_distribution(distrib, show='hist-proportion',
         ax.set_axisbelow(True)
         ax.set_xticks([0, 0.5, 1])
 
-        if show == 'hist':
-            counts = dist['hist'][ref][0]
-            edges = dist['hist'][ref][1]
-            
-            ax.stairs(counts, edges, fill=True, alpha=0.65, 
-                      edgecolor='black', linewidth=0.8)
-            
-            if global_x_min != float('inf'):
-                # Marge de 5% sur l'axe X pour aérer
-                x_margin = (global_x_max - global_x_min) * 0.05
-                x_margin = x_margin if x_margin > 0 else 0.5 
-                ax.set_xlim(global_x_min - x_margin, global_x_max + x_margin)
-                # Marge de 10% sur l'axe Y au-dessus de la plus haute barre
-                #ax.set_ylim(0, global_y_max * 1.1)
+        if show == 'kde':
+            x_eval = np.linspace(0, 1.5, num=50)
+            ax.plot(x_eval, dist['kde']['center'](x_eval))
 
-        elif show == 'kde':
-            x_eval = np.linspace(0, 1.5, num=50) if ref=='center' else np.linspace(0, 5, num=50)
-            ax.plot(x_eval, dist['kde'][ref](x_eval))
-        
         elif show == 'hist-proportion':
             counts = dist['hist-proportion'][0]
             edges = dist['hist-proportion'][1]
             
             ax.stairs(counts, edges, fill=True, alpha=0.65, 
                       edgecolor='black', linewidth=0.8)
-            
-            """ if global_x_min != float('inf'):
-                x_margin = (global_x_max - global_x_min) * 0.05
-                x_margin = x_margin if x_margin > 0 else 0.5 
-                ax.set_xlim(global_x_min - x_margin, global_x_max + x_margin)
-                ax.set_ylim(0, global_y_max * 1.1) """
+
         else:
             title = sld_name if 'UTC' not in sld_name else sld_name.split('UTC')[0]
             ax.set_title(f"Lame {title}", fontsize=11, color='#999999', style='italic')
@@ -421,7 +449,28 @@ def plot_distribution(distrib, show='hist-proportion',
 
     plt.tight_layout()
 
-def plot_slide_grid(slides, figsize=(14,15), output=None, imgtitles=None):
+def plot_slide_grid(
+        slides: np.ndarray, figsize=(14,15),
+        output: str = None, imgtitles: list[str] = None
+) -> None:
+    """
+        Plot the tumor bed images in color in a grid layout.
+
+    Parameters
+    ----------
+    slides : np.ndarray
+        slides annotations with tumor
+    figsize : tuple[int, int]
+        size of the figure.
+    output : str
+        name of the output file.
+    imgtitles : list[str]
+        the list of titles for each slide.
+
+    Returns
+    -------
+        None
+    """
     n = len(slides)
 
     cols = math.ceil(math.sqrt(n))

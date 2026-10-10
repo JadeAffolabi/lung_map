@@ -5,20 +5,23 @@ from scipy.ndimage import binary_fill_holes
 import tifffile
 
 
-from src.repartition.constants import CLASSES, COLOR2LABEL
+from src.repartition.constants import CLASSES
 
-def is_valid_mask(mask, num_class=10):
-    return np.all(mask < num_class)
+def smooth_combined_mask(mask: np.ndarray, close_radius: int = 10) -> np.ndarray:
+    """
+    Combined the cracked parts of the original mask to make one seamless whole.
 
-def make_valid_mask(mask):
-    new_mask = np.zeros(mask.shape[:2], dtype=np.uint8)
+    Parameters
+    ----------
+    mask : np.ndarray
+        Cracked mask.
+    close_radius : int (optional)
+        Radius of the kernel.
 
-    for color, label in COLOR2LABEL.items():
-        match = np.all(mask == color, axis=-1)
-        new_mask[match] = label
-    return new_mask
-
-def smooth_combined_mask(mask, close_radius=10):
+    Returns
+    -------
+    smoothed_mask : np.ndarray
+    """
     global_mask = mask.astype(np.uint8)
     kernel = cv2.getStructuringElement(
         cv2.MORPH_ELLIPSE, (2 * close_radius + 1, 2 * close_radius + 1)
@@ -27,7 +30,26 @@ def smooth_combined_mask(mask, close_radius=10):
     global_mask = binary_fill_holes(global_mask)
     return global_mask
 
-def is_jagged(mask, crack_width=15, threshold=0.02):
+def is_cracked(mask: np.ndarray, crack_width=15, threshold=0.02) -> bool:
+    """
+    Check if a mask is cracked. A cracked mask is one where the object of interest is supposed to be
+    one whole but the mask is in fact has more than one component. Each component is separated
+    by a small empty space "crack".
+
+    Parameters
+    ----------
+    mask : np.ndarray
+        mask to be checked
+    crack_width : int (optional)
+        the maximum width of a crack.
+    threshold : float (optional)
+        threshold to determine if a mask is cracked.
+        The crack pixels ratio is compared to that threshold.
+
+    Returns
+    -------
+        bool
+    """
     bg = mask == False
     mask = (mask * 1).astype(np.uint8)
     bg = (bg * 1).astype(np.uint8)
@@ -51,9 +73,27 @@ def is_jagged(mask, crack_width=15, threshold=0.02):
     crack_pixels = h_crack | v_crack
 
     crack_ratio = crack_pixels.sum() / max(1, mask.sum())
-    return crack_ratio > threshold, crack_ratio
+    return crack_ratio > threshold
 
-def is_nested_mask(mask1, mask2, tol=1e-1, kernel_size=3):
+def is_nested_mask(
+        mask1: np.ndarray, mask2: np.ndarray, tol=1e-1, kernel_size=3) -> bool:
+    """
+    Check if mask1 is contained in mask2.
+
+    Parameters
+    ----------
+    mask1 : np.ndarray
+    mask2 : np.ndarray
+    tol : float (optional)
+        threshold of the ratio of foreground to background.
+        If the ratio is lower than that value, the returned value is True, else False.
+    kernel_size : int (optional)
+        size of the kernel used to dilate the intersection between mask1 and mask2.
+
+    Returns
+    -------
+        bool
+    """
     intersection = mask1 & mask2 
     kernel = np.ones((kernel_size, kernel_size), np.uint8) 
     dilated_intersect = cv2.dilate(intersection, kernel, iterations=1)
@@ -69,46 +109,57 @@ def is_nested_mask(mask1, mask2, tol=1e-1, kernel_size=3):
     else:
         return True
 
-def tif_to_real_mask(img_tif):
+def refine_masks(raw_masks: np.ndarray) -> dict:
+    """
+    Refine the masks by applying a substraction when a mask from one class
+    is contained within a mask from another class.
+
+    Parameters
+    ----------
+    raw_masks : np.ndarray
+
+    Returns
+    -------
+        new_masks : dict[str, np.ndarray]
+    """
     masks = dict()
     for cls in CLASSES:
-        msk = img_tif[CLASSES[cls],:,:]
+        msk = raw_masks[CLASSES[cls], :, :]
         msk = (msk != 0).astype(np.uint8) # security
         for other_cls in CLASSES:
             if other_cls == cls:
                 continue
-            other_msk = img_tif[CLASSES[other_cls],:,:]
+            other_msk = raw_masks[CLASSES[other_cls], :, :]
             other_msk = (other_msk != 0).astype(np.uint8) # security
             if np.any(msk & other_msk) and (not is_nested_mask(msk, other_msk)):
                 msk = msk & ~other_msk
         masks.update(
             {cls: msk}
         )
-    bed_mask = np.any(img_tif[:,:,:], axis=0)
+    bed_mask = np.any(raw_masks[:, :, :], axis=0)
     masks.update(
         {'tumor_bed': smooth_combined_mask(bed_mask.astype(np.uint8))}
     )
     return masks
 
-def tif_to_filled_mask(img_tif):
-    masks = dict()
-    for cls in CLASSES:
-        masks.update(
-            {cls: img_tif[CLASSES[cls],:,:]}
-        )
-    bed_mask = np.any(img_tif[:,:,:], axis=0)
-    masks.update(
-        {'tumor_bed': smooth_combined_mask(bed_mask) if is_jagged(bed_mask) 
-         else bed_mask}
-    )
-    return masks
+def get_annotation(path2annot: np.ndarray) -> dict:
+    """
+    Load the images annotation from the list of paths.
+    Parameters
+    ----------
+    path2annot : np.ndarray
+        list of annotation paths.
 
-def get_annotation(path2annot, tif_to_mask):
+    Returns
+    -------
+        slides_annot : dict[str, dict]
+            dictionary containing the slide name as key and the multiarray masks as value.
+    """
     slides_annot = dict()
     for annot_pth in path2annot:
         slide_name = annot_pth.split("/")[-1].split("-")[0]
-        img = tifffile.imread(annot_pth)
-        masks = tif_to_mask(img)
+        raw_masks = tifffile.imread(annot_pth)
+        masks = refine_masks(raw_masks)
 
         slides_annot.update({
             slide_name: masks

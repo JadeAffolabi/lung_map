@@ -8,7 +8,7 @@ import time
 
 
 
-from src.repartition.data_loading import tif_to_real_mask
+from src.repartition.data_loading import refine_masks
 from src.segmentation.constants import CLASSES_TO_LABELS
 
 def get_annotation_ratio(tif_path: Path) -> float:
@@ -65,7 +65,7 @@ def filter_and_compress(dir_path: Path, threshold: float, false_run: bool = Fals
         for png_path, tif_path in valid_pairs:
             img = np.array(Image.open(png_path).convert("RGB"))
             mask_tif = tifffile.imread(tif_path)
-            annotations = tif_to_real_mask(mask_tif)
+            annotations = refine_masks(mask_tif)
             mask = np.zeros((img.shape[0], img.shape[1]))
             for cls in CLASSES_TO_LABELS:
                 if cls != 'other':
